@@ -1,0 +1,18 @@
+@inherits LayoutComponentBase
+
+@* The shared page frame: top navigation bar + page content below.
+   The nav bar gets the "no-print" class so it disappears on printouts. *@
+
+<nav class="navbar navbar-expand navbar-dark bg-dark no-print mb-4">
+    <div class="container-fluid">
+        <a class="navbar-brand" href="/">GCW Sheet Optimizer</a>
+        <div class="navbar-nav">
+            <NavLink class="nav-link" href="/" Match="NavLinkMatch.All">Projects</NavLink>
+            <NavLink class="nav-link" href="/partial-sheets">Partial Sheet Inventory</NavLink>
+        </div>
+    </div>
+</nav>
+
+<main class="container-fluid px-4">
+    @Body
+</main>

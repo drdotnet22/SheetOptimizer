@@ -1,0 +1,452 @@
+@page "/project/{Id:int}/results"
+@using System.Text.Json
+@inject IDbContextFactory<AppDbContext> DbFactory
+@inject IJSRuntime JS
+
+@* ---------------------------------------------------------------------------
+   Results page: shows the saved optimizer output for a project.
+     - visual sheet layouts (SVG, drawn to scale)
+     - a text "cutlist per sheet" view for use at the saw
+     - print support (one sheet per page)
+     - save leftover offcuts to the partial-sheet inventory
+     - mark used partial sheets as consumed
+--------------------------------------------------------------------------- *@
+
+@if (loading)
+{
+    <p>Loading...</p>
+}
+else if (project is null)
+{
+    <p>Project not found.</p>
+}
+else if (solution is null)
+{
+    <h1>@project.Name &mdash; results</h1>
+    <p class="text-muted">
+        No optimizer results saved for this project yet.
+        <a href="/project/@Id">Go to the cutlist editor</a> and click
+        "Save + run optimizer".
+    </p>
+}
+else
+{
+    <div class="d-flex justify-content-between align-items-center flex-wrap no-print">
+        <h1>@project.Name &mdash; results</h1>
+        <div class="d-flex gap-2">
+            <a href="/project/@Id" class="btn btn-outline-secondary">Back to cutlist</a>
+            <button class="btn btn-outline-primary" @onclick="ToggleView">
+                @(showTable ? "Show visual layouts" : "Show cutlist tables")
+            </button>
+            <button class="btn btn-primary" @onclick="PrintAsync">Print</button>
+        </div>
+    </div>
+
+    <p class="text-muted">
+        Generated @solution.GeneratedDate.ToLocalTime().ToString("yyyy-MM-dd HH:mm"),
+        kerf @FormatDim(solution.KerfWidth)&quot;.
+        Total sheets used: @TotalSheetCount.
+    </p>
+
+    @if (statusMessage is not null)
+    {
+        <div class="alert alert-success no-print">@statusMessage</div>
+    }
+    @if (errorMessage is not null)
+    {
+        <div class="alert alert-danger no-print">@errorMessage</div>
+    }
+
+    @* ---------- Warnings for parts that did not fit ---------- *@
+    @foreach (var material in solution.Materials.Where(m => m.UnplacedParts.Count > 0))
+    {
+        <div class="alert alert-warning">
+            <strong>@material.Material — @material.UnplacedParts.Count part(s) could not be placed:</strong>
+            <ul class="mb-0">
+                @foreach (var unplaced in material.UnplacedParts)
+                {
+                    <li>@PartName(unplaced.Label) (@FormatDim(unplaced.Width)&quot; x @FormatDim(unplaced.Length)&quot;): @unplaced.Reason</li>
+                }
+            </ul>
+        </div>
+    }
+
+    @* ---------- Used partial sheets: offer to consume from inventory ---------- *@
+    @if (UsedPartialSheetIds.Count > 0 && !partialsConsumed)
+    {
+        <div class="alert alert-info no-print">
+            This layout uses <strong>@UsedPartialSheetIds.Count partial sheet(s)</strong> from your inventory.
+            When you actually cut this job, remove them from inventory:
+            <button class="btn btn-sm btn-primary ms-2" @onclick="ConsumeUsedPartialsAsync">
+                Mark used partial sheets as consumed
+            </button>
+        </div>
+    }
+
+    @* ============================ SHEETS ============================ *@
+    @foreach (var material in solution.Materials)
+    {
+        <h2 class="mt-4">@material.Material</h2>
+        <p class="text-muted">
+            @material.Sheets.Count sheet(s)
+            (@material.Sheets.Count(s => !s.IsPartialSheet) full,
+            @material.Sheets.Count(s => s.IsPartialSheet) from partial inventory)
+            &mdash; material used: @Utilization(material).ToString("0")%
+            @if (!string.IsNullOrEmpty(material.StrategyName))
+            {
+                <span> &mdash; winning strategy: @material.StrategyName</span>
+            }
+        </p>
+
+        @foreach (var sheet in material.Sheets)
+        {
+            <div class="sheet-block card mb-4">
+                <div class="card-header">
+                    <strong>Sheet @sheet.SheetNumber</strong> &mdash; @material.Material,
+                    @FormatDim(sheet.SheetWidth)&quot; x @FormatDim(sheet.SheetLength)&quot;
+                    @if (sheet.IsPartialSheet)
+                    {
+                        <span class="badge bg-info ms-2">partial sheet from inventory</span>
+                    }
+                </div>
+                <div class="card-body">
+                    @if (!showTable)
+                    {
+                        @* --- Visual layout. The sheet is drawn lying on its side
+                               (96" running left-to-right), like it sits on a panel saw.
+                               SVG x = inches along the length, SVG y = inches across
+                               the width, both scaled x10 for crisp text. --- *@
+                        <svg class="sheet-svg" viewBox="0 0 @Sc(sheet.SheetLength) @Sc(sheet.SheetWidth)"
+                             xmlns="http://www.w3.org/2000/svg">
+                            <rect x="0" y="0" width="@Sc(sheet.SheetLength)" height="@Sc(sheet.SheetWidth)"
+                                  fill="#f5efe1" stroke="#333" stroke-width="4" />
+
+                            @* leftover regions: light hatching *@
+                            @foreach (var leftover in sheet.Leftovers)
+                            {
+                                <rect x="@Sc(leftover.Y)" y="@Sc(leftover.X)"
+                                      width="@Sc(leftover.Length)" height="@Sc(leftover.Width)"
+                                      fill="#e9ecef" stroke="#adb5bd" stroke-width="2" stroke-dasharray="12 8" />
+                            }
+
+                            @* the parts *@
+                            @foreach (var placed in sheet.Parts)
+                            {
+                                <rect x="@Sc(placed.Y)" y="@Sc(placed.X)"
+                                      width="@Sc(placed.Length)" height="@Sc(placed.Width)"
+                                      fill="#cfe2ff" stroke="#0d6efd" stroke-width="3" />
+                                @* SVG <text> elements can't be written literally here
+                                   because <text> is a reserved Razor keyword, so the
+                                   labels are emitted as raw markup by a helper. *@
+                                @PartLabelSvg(placed)
+                            }
+                        </svg>
+                        <p class="text-muted mt-1 mb-0" style="font-size: 0.85em;">
+                            Dashed areas are unused. "(R)" marks parts rotated 90&deg; from
+                            their cutlist orientation. Labels show cutlist Width x Length.
+                        </p>
+                    }
+
+                    @* --- Cutlist table for this sheet. Shown in both views:
+                           it is the "legend" under the drawing in visual mode,
+                           and the whole content of the table view. --- *@
+                    <div class="@(showTable ? "" : "sheet-legend mt-3")">
+                        <table class="table table-sm table-striped mb-0">
+                            <thead>
+                                <tr>
+                                    <th>Part</th>
+                                    <th>Cut size (W x L)</th>
+                                    <th>Rotated?</th>
+                                    <th>Position from corner (across, along)</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var placed in sheet.Parts)
+                                {
+                                    <tr>
+                                        <td>@PartName(placed.Label)</td>
+                                        <td>@DimsAsCut(placed)</td>
+                                        <td>@(placed.Rotated ? "yes" : "no")</td>
+                                        <td>@FormatDim(placed.X)&quot;, @FormatDim(placed.Y)&quot;</td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        }
+    }
+
+    @* ============================ OFFCUTS ============================ *@
+    <div class="card mb-5 no-print">
+        <div class="card-body">
+            <h5 class="card-title">Save leftovers to partial-sheet inventory</h5>
+            <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
+                <span>Only offer leftovers at least</span>
+                <input type="number" class="form-control" style="width: 90px;" step="1" min="1" @bind="minOffcutWidth" />
+                <span>&quot; x</span>
+                <input type="number" class="form-control" style="width: 90px;" step="1" min="1" @bind="minOffcutLength" />
+                <span>&quot;</span>
+            </div>
+
+            @if (OffcutCandidates.Count == 0)
+            {
+                <p class="text-muted mb-0">No leftovers at or above that size in this layout.</p>
+            }
+            else
+            {
+                <table class="table table-sm align-middle" style="max-width: 700px;">
+                    <thead>
+                        <tr>
+                            <th style="width: 40px;"></th>
+                            <th>Material</th>
+                            <th>Size (W x L)</th>
+                            <th>From</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var candidate in OffcutCandidates)
+                        {
+                            <tr>
+                                <td>
+                                    @if (savedOffcutKeys.Contains(candidate.Key))
+                                    {
+                                        <span title="Already added">&#10003;</span>
+                                    }
+                                    else
+                                    {
+                                        <input type="checkbox" class="form-check-input"
+                                               checked="@selectedOffcutKeys.Contains(candidate.Key)"
+                                               @onchange="e => ToggleOffcut(candidate.Key, (bool)e.Value!)" />
+                                    }
+                                </td>
+                                <td>@candidate.Material</td>
+                                <td>@FormatDim(candidate.Region.Width)&quot; x @FormatDim(candidate.Region.Length)&quot;</td>
+                                <td>Sheet @candidate.SheetNumber</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+                <button class="btn btn-primary" @onclick="SaveSelectedOffcutsAsync"
+                        disabled="@(selectedOffcutKeys.Count == 0)">
+                    Add @selectedOffcutKeys.Count selected offcut(s) to inventory
+                </button>
+            }
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public int Id { get; set; }
+
+    private Project? project;
+    private NestingSolution? solution;
+    private bool loading = true;
+    private bool showTable;
+    private bool partialsConsumed;
+    private string? statusMessage;
+    private string? errorMessage;
+
+    private decimal minOffcutWidth = 12m;
+    private decimal minOffcutLength = 12m;
+    private readonly HashSet<string> selectedOffcutKeys = new();
+    private readonly HashSet<string> savedOffcutKeys = new();
+
+    // ----------------------- Loading -----------------------
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            project = await db.Projects.FindAsync(Id);
+
+            var latest = await db.NestingResults
+                .Where(r => r.ProjectId == Id)
+                .OrderByDescending(r => r.GeneratedDate)
+                .FirstOrDefaultAsync();
+
+            if (latest is not null)
+            {
+                solution = JsonSerializer.Deserialize<NestingSolution>(latest.ResultDataJson);
+            }
+        }
+        catch (Exception ex)
+        {
+            errorMessage = "Could not load results: " + ex.Message;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    // ----------------------- Small display helpers -----------------------
+
+    /// <summary>Scale inches to SVG units (x10 keeps label text crisp).</summary>
+    private static decimal Sc(decimal inches) => inches * 10m;
+
+    /// <summary>SVG coordinate of the middle of a span, for centering text.</summary>
+    private static decimal ScMid(decimal start, decimal size) => (start + size / 2m) * 10m;
+
+    /// <summary>Formats a dimension without trailing zeros: 23.750 -> "23.75".</summary>
+    private static string FormatDim(decimal value) => value.ToString("0.###");
+
+    private static string PartName(string? label) =>
+        string.IsNullOrWhiteSpace(label) ? "(unnamed)" : label;
+
+    /// <summary>
+    /// Builds the two SVG text labels (name + dimensions) for a placed part.
+    /// Emitted as raw markup because Razor reserves the &lt;text&gt; tag and
+    /// won't allow attributes on it in .razor files. The label text is
+    /// HTML-encoded, so part names can safely contain characters like &amp; or &lt;.
+    /// </summary>
+    private static MarkupString PartLabelSvg(PlacedPart placed)
+    {
+        // Invariant culture so decimals always use "." (SVG requires it).
+        var cx = ScMid(placed.Y, placed.Length).ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var cyName = (ScMid(placed.X, placed.Width) - 8).ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var cyDims = (ScMid(placed.X, placed.Width) + 24).ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+        var name = System.Net.WebUtility.HtmlEncode(PartName(placed.Label) + (placed.Rotated ? " (R)" : ""));
+        var dims = System.Net.WebUtility.HtmlEncode(DimsAsCut(placed));
+
+        return new MarkupString(
+            $"<text x=\"{cx}\" y=\"{cyName}\" text-anchor=\"middle\" font-size=\"26\" fill=\"#1a1a1a\">{name}</text>" +
+            $"<text x=\"{cx}\" y=\"{cyDims}\" text-anchor=\"middle\" font-size=\"24\" fill=\"#444\">{dims}</text>");
+    }
+
+    /// <summary>The part's size in cutlist orientation (undo the rotation for display).</summary>
+    private static string DimsAsCut(PlacedPart placed)
+    {
+        var w = placed.Rotated ? placed.Length : placed.Width;
+        var l = placed.Rotated ? placed.Width : placed.Length;
+        return $"{FormatDim(w)}\" x {FormatDim(l)}\"";
+    }
+
+    private int TotalSheetCount => solution?.Materials.Sum(m => m.Sheets.Count) ?? 0;
+
+    /// <summary>Percentage of sheet area actually covered by parts.</summary>
+    private static decimal Utilization(MaterialNesting material)
+    {
+        var sheetArea = material.Sheets.Sum(s => s.SheetWidth * s.SheetLength);
+        if (sheetArea == 0) return 0;
+        var partArea = material.Sheets.Sum(s => s.Parts.Sum(p => p.Width * p.Length));
+        return partArea / sheetArea * 100m;
+    }
+
+    private void ToggleView() => showTable = !showTable;
+
+    private async Task PrintAsync() => await JS.InvokeVoidAsync("window.print");
+
+    // ----------------------- Offcut saving -----------------------
+
+    private record OffcutCandidate(string Key, string Material, int SheetNumber, FreeRegion Region);
+
+    private List<OffcutCandidate> OffcutCandidates
+    {
+        get
+        {
+            var list = new List<OffcutCandidate>();
+            if (solution is null) return list;
+
+            foreach (var material in solution.Materials)
+                foreach (var sheet in material.Sheets)
+                    for (var i = 0; i < sheet.Leftovers.Count; i++)
+                    {
+                        var region = sheet.Leftovers[i];
+                        if (region.Width >= minOffcutWidth && region.Length >= minOffcutLength)
+                        {
+                            // A stable key so selections survive re-renders.
+                            var key = $"{material.Material}|{sheet.SheetNumber}|{i}";
+                            list.Add(new OffcutCandidate(key, material.Material, sheet.SheetNumber, region));
+                        }
+                    }
+            return list;
+        }
+    }
+
+    private void ToggleOffcut(string key, bool selected)
+    {
+        if (selected) selectedOffcutKeys.Add(key);
+        else selectedOffcutKeys.Remove(key);
+    }
+
+    private async Task SaveSelectedOffcutsAsync()
+    {
+        try
+        {
+            var chosen = OffcutCandidates
+                .Where(c => selectedOffcutKeys.Contains(c.Key) && !savedOffcutKeys.Contains(c.Key))
+                .ToList();
+            if (chosen.Count == 0) return;
+
+            await using var db = await DbFactory.CreateDbContextAsync();
+            foreach (var candidate in chosen)
+            {
+                db.PartialSheets.Add(new PartialSheet
+                {
+                    Width = candidate.Region.Width,
+                    Length = candidate.Region.Length,
+                    Material = candidate.Material,
+                    Quantity = 1,
+                    DateAdded = DateTime.UtcNow,
+                    SourceProjectId = Id,
+                    Notes = $"Offcut from \"{project?.Name}\" (sheet {candidate.SheetNumber})",
+                });
+                savedOffcutKeys.Add(candidate.Key);
+            }
+            await db.SaveChangesAsync();
+
+            selectedOffcutKeys.Clear();
+            statusMessage = $"Added {chosen.Count} offcut(s) to the partial-sheet inventory.";
+            errorMessage = null;
+        }
+        catch (Exception ex)
+        {
+            errorMessage = "Could not save offcuts: " + ex.Message;
+        }
+    }
+
+    // ----------------------- Consuming used partial sheets -----------------------
+
+    /// <summary>Inventory ids of partial sheets this layout uses (with repeats).</summary>
+    private List<int> UsedPartialSheetIds =>
+        solution?.Materials
+            .SelectMany(m => m.Sheets)
+            .Where(s => s.IsPartialSheet && s.SourcePartialSheetId.HasValue)
+            .Select(s => s.SourcePartialSheetId!.Value)
+            .ToList()
+        ?? new List<int>();
+
+    private async Task ConsumeUsedPartialsAsync()
+    {
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+
+            // Group repeats: the same inventory row may supply several sheets.
+            foreach (var group in UsedPartialSheetIds.GroupBy(id => id))
+            {
+                var sheet = await db.PartialSheets.FindAsync(group.Key);
+                if (sheet is null) continue; // already deleted - nothing to do
+
+                sheet.Quantity -= group.Count();
+                if (sheet.Quantity <= 0)
+                {
+                    db.PartialSheets.Remove(sheet);
+                }
+            }
+            await db.SaveChangesAsync();
+
+            partialsConsumed = true;
+            statusMessage = "Inventory updated - used partial sheets were removed.";
+            errorMessage = null;
+        }
+        catch (Exception ex)
+        {
+            errorMessage = "Could not update the inventory: " + ex.Message;
+        }
+    }
+}

@@ -1,0 +1,341 @@
+@page "/project/{Id:int}"
+@using System.Text.Json
+@inject IDbContextFactory<AppDbContext> DbFactory
+@inject CsvImportService CsvImporter
+@inject NestingService Nester
+@inject NavigationManager Nav
+
+@* ---------------------------------------------------------------------------
+   The cutlist editor for one project:
+     - import parts from a CSV file
+     - edit parts in a grid (add / duplicate / delete / edit inline)
+     - set the kerf width
+     - run the optimizer
+--------------------------------------------------------------------------- *@
+
+@if (project is null)
+{
+    <p>@(notFound ? "Project not found." : "Loading...")</p>
+}
+else
+{
+    <div class="d-flex justify-content-between align-items-center flex-wrap">
+        <h1>@project.Name</h1>
+        <a href="/project/@project.Id/results" class="btn btn-outline-secondary">
+            View last results
+        </a>
+    </div>
+
+    @if (statusMessage is not null)
+    {
+        <div class="alert alert-success">@statusMessage</div>
+    }
+    @if (errorMessage is not null)
+    {
+        <div class="alert alert-danger">@errorMessage</div>
+    }
+
+    @* ----------------------- CSV import ----------------------- *@
+    <div class="card mb-4">
+        <div class="card-body">
+            <h5 class="card-title">Import cutlist from CSV</h5>
+            <p class="text-muted mb-2">
+                Expected columns: <code>Quantity, Width, Length, Material, GrainMatters, Label</code>
+                (Label is optional; GrainMatters accepts true/false, 1/0, yes/no).
+                Dimensions are in inches, decimals allowed (e.g. 23.75).
+            </p>
+            <InputFile OnChange="ImportCsvAsync" accept=".csv,text/csv" class="form-control" style="max-width: 400px;" />
+
+            @if (importErrors.Count > 0)
+            {
+                <div class="alert alert-warning mt-3 mb-0">
+                    <strong>Some rows could not be imported:</strong>
+                    <ul class="mb-0">
+                        @foreach (var error in importErrors)
+                        {
+                            <li>@error</li>
+                        }
+                    </ul>
+                </div>
+            }
+        </div>
+    </div>
+
+    @* ----------------------- Kerf setting ----------------------- *@
+    <div class="mb-3 d-flex align-items-center gap-2">
+        <label class="form-label mb-0"><strong>Kerf width</strong> (blade thickness, inches):</label>
+        <input type="number" class="form-control" style="width: 110px;"
+               step="0.001" min="0" max="1" @bind="project.KerfWidth" />
+        <span class="text-muted">(1/8" = 0.125)</span>
+    </div>
+
+    @* ----------------------- Editable grid ----------------------- *@
+    <table class="table table-sm align-middle cutlist-grid">
+        <thead>
+            <tr>
+                <th style="min-width: 160px;">Label</th>
+                <th style="width: 90px;">Qty</th>
+                <th style="width: 110px;">Width (in)</th>
+                <th style="width: 110px;">Length (in)</th>
+                <th style="min-width: 180px;">Material</th>
+                <th style="width: 110px;" title="If checked, the part will not be rotated 90&deg;">Grain matters</th>
+                <th style="width: 170px;"></th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var part in parts)
+            {
+                <tr>
+                    <td><input class="form-control form-control-sm" @bind="part.Label" placeholder="(optional)" /></td>
+                    <td><input type="number" class="form-control form-control-sm" min="1" @bind="part.Quantity" /></td>
+                    <td><input type="number" class="form-control form-control-sm" step="0.0625" min="0" @bind="part.Width" /></td>
+                    <td><input type="number" class="form-control form-control-sm" step="0.0625" min="0" @bind="part.Length" /></td>
+                    <td><input class="form-control form-control-sm" @bind="part.Material" placeholder="e.g. 3/4 Birch Plywood" /></td>
+                    <td class="text-center"><input type="checkbox" class="form-check-input" @bind="part.GrainMatters" /></td>
+                    <td class="text-end">
+                        <button class="btn btn-sm btn-outline-secondary me-1" title="Duplicate this row"
+                                @onclick="() => DuplicateRow(part)">Duplicate</button>
+                        <button class="btn btn-sm btn-outline-danger" title="Delete this row"
+                                @onclick="() => DeleteRow(part)">Delete</button>
+                    </td>
+                </tr>
+            }
+        </tbody>
+    </table>
+
+    <button class="btn btn-outline-primary mb-3" @onclick="AddRow">+ Add row</button>
+
+    @* ----------------------- Running totals ----------------------- *@
+    <div class="alert alert-light border">
+        <strong>Totals:</strong>
+        @TotalPieces piece(s),
+        @TotalSquareFeet.ToString("0.0") sq ft of parts
+        (very roughly @EstimatedSheets.ToString("0.0") full sheets' worth &mdash;
+        the optimizer gives the real count).
+    </div>
+
+    @* ----------------------- Actions ----------------------- *@
+    <div class="d-flex gap-2 mb-5">
+        <button class="btn btn-primary" @onclick="SaveAllAsync">Save changes</button>
+        <button class="btn btn-success" @onclick="RunOptimizerAsync" disabled="@isOptimizing">
+            @(isOptimizing ? "Optimizing..." : "Save + run optimizer")
+        </button>
+    </div>
+}
+
+@code {
+    [Parameter] public int Id { get; set; }
+
+    private Project? project;
+    private List<Part> parts = new();
+    private readonly List<int> deletedPartIds = new(); // existing rows removed in the UI
+    private readonly List<string> importErrors = new();
+
+    private bool notFound;
+    private bool isOptimizing;
+    private string? statusMessage;
+    private string? errorMessage;
+
+    // --- Running totals (recomputed on every render - lists are small) ---
+    private int TotalPieces => parts.Sum(p => Math.Max(0, p.Quantity));
+    private decimal TotalSquareFeet => parts.Sum(p => Math.Max(0, p.Quantity) * p.Width * p.Length) / 144m;
+    private decimal EstimatedSheets => TotalSquareFeet / 32m; // a 48x96 sheet is 32 sq ft
+
+    protected override async Task OnInitializedAsync()
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        project = await db.Projects
+            .Include(p => p.Parts)
+            .FirstOrDefaultAsync(p => p.Id == Id);
+
+        if (project is null)
+        {
+            notFound = true;
+            return;
+        }
+
+        parts = project.Parts.OrderBy(p => p.Id).ToList();
+    }
+
+    // ----------------------- Grid actions -----------------------
+
+    private void AddRow()
+    {
+        parts.Add(new Part { ProjectId = Id, Quantity = 1 });
+    }
+
+    private void DuplicateRow(Part source)
+    {
+        parts.Add(new Part
+        {
+            ProjectId = Id,
+            Quantity = source.Quantity,
+            Width = source.Width,
+            Length = source.Length,
+            Material = source.Material,
+            GrainMatters = source.GrainMatters,
+            Label = source.Label,
+        });
+    }
+
+    private void DeleteRow(Part part)
+    {
+        parts.Remove(part);
+        if (part.Id != 0)
+        {
+            // Existing database row - remember to delete it on save.
+            deletedPartIds.Add(part.Id);
+        }
+    }
+
+    // ----------------------- CSV import -----------------------
+
+    private async Task ImportCsvAsync(InputFileChangeEventArgs e)
+    {
+        ClearMessages();
+        importErrors.Clear();
+
+        try
+        {
+            // Copy the upload into memory first (CsvHelper reads synchronously).
+            using var memory = new MemoryStream();
+            await e.File.OpenReadStream(maxAllowedSize: 5 * 1024 * 1024).CopyToAsync(memory);
+            memory.Position = 0;
+
+            var result = CsvImporter.Parse(memory);
+
+            if (result.FileError is not null)
+            {
+                errorMessage = result.FileError;
+                return;
+            }
+
+            importErrors.AddRange(result.RowErrors);
+
+            foreach (var part in result.ValidParts)
+            {
+                part.ProjectId = Id;
+                parts.Add(part);
+            }
+
+            // Persist immediately so imported rows become real Part records.
+            await SaveAllAsync();
+            statusMessage = $"Imported {result.ValidParts.Count} row(s) from {e.File.Name}."
+                + (importErrors.Count > 0 ? $" {importErrors.Count} row(s) were skipped (see below)." : "");
+        }
+        catch (Exception ex)
+        {
+            errorMessage = "Import failed: " + ex.Message;
+        }
+    }
+
+    // ----------------------- Saving -----------------------
+
+    private async Task SaveAllAsync()
+    {
+        ClearMessages();
+
+        // Friendly validation before touching the database.
+        var problems = new List<string>();
+        for (var i = 0; i < parts.Count; i++)
+        {
+            var p = parts[i];
+            if (p.Quantity <= 0) problems.Add($"Row {i + 1}: quantity must be at least 1.");
+            if (p.Width <= 0 || p.Length <= 0) problems.Add($"Row {i + 1}: width and length must be greater than zero.");
+            if (string.IsNullOrWhiteSpace(p.Material)) problems.Add($"Row {i + 1}: material is required.");
+        }
+        if (problems.Count > 0)
+        {
+            errorMessage = string.Join(" ", problems);
+            return;
+        }
+
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+
+            // Save the kerf (and any other project-level changes).
+            db.Projects.Update(project!);
+
+            foreach (var part in parts)
+            {
+                part.Material = part.Material.Trim();
+                if (part.Id == 0)
+                    db.Parts.Add(part);      // new row
+                else
+                    db.Parts.Update(part);   // edited row
+            }
+
+            if (deletedPartIds.Count > 0)
+            {
+                var toDelete = await db.Parts
+                    .Where(p => deletedPartIds.Contains(p.Id))
+                    .ToListAsync();
+                db.Parts.RemoveRange(toDelete);
+            }
+
+            await db.SaveChangesAsync();
+            deletedPartIds.Clear();
+            statusMessage ??= "Saved.";
+        }
+        catch (Exception ex)
+        {
+            errorMessage = "Could not save: " + ex.Message;
+        }
+    }
+
+    // ----------------------- Run the optimizer -----------------------
+
+    private async Task RunOptimizerAsync()
+    {
+        await SaveAllAsync();
+        if (errorMessage is not null) return; // don't optimize an unsaved/invalid list
+
+        if (parts.Count == 0)
+        {
+            errorMessage = "Add some parts first - there is nothing to optimize.";
+            return;
+        }
+
+        isOptimizing = true;
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+
+            // The optimizer considers the current partial-sheet inventory.
+            var inventory = await db.PartialSheets
+                .Where(ps => ps.Quantity > 0)
+                .ToListAsync();
+
+            var solution = Nester.Nest(parts, project!.KerfWidth, inventory, new NestingOptions());
+
+            // Keep only the most recent result per project.
+            var oldResults = await db.NestingResults.Where(r => r.ProjectId == Id).ToListAsync();
+            db.NestingResults.RemoveRange(oldResults);
+
+            db.NestingResults.Add(new NestingResult
+            {
+                ProjectId = Id,
+                ResultDataJson = JsonSerializer.Serialize(solution),
+                GeneratedDate = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+
+            Nav.NavigateTo($"/project/{Id}/results");
+        }
+        catch (Exception ex)
+        {
+            errorMessage = "The optimizer hit a problem: " + ex.Message;
+        }
+        finally
+        {
+            isOptimizing = false;
+        }
+    }
+
+    private void ClearMessages()
+    {
+        statusMessage = null;
+        errorMessage = null;
+    }
+}

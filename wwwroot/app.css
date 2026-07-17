@@ -1,0 +1,56 @@
+/* ---------------------------------------------------------------------------
+   App-wide styles. Bootstrap does most of the work; this file adds the
+   sheet-drawing styles and the print layout.
+--------------------------------------------------------------------------- */
+
+/* The SVG sheet drawings scale to fit the page but never get huge. */
+.sheet-svg {
+    width: 100%;
+    max-width: 950px;
+    height: auto;
+    display: block;
+}
+
+/* Slightly tighter inputs in the cutlist grid. */
+.cutlist-grid input.form-control-sm {
+    min-width: 60px;
+}
+
+/* ---------------------------------------------------------------------------
+   PRINT LAYOUT
+   - hide navigation, buttons and other interactive chrome
+   - one sheet per printed page, with its legend table
+--------------------------------------------------------------------------- */
+@media print {
+
+    /* Hide everything marked "no-print" (nav bar, buttons, offcut form...). */
+    .no-print {
+        display: none !important;
+    }
+
+    /* Each sheet card starts a fresh page (except the very last one). */
+    .sheet-block {
+        page-break-after: always;
+        break-inside: avoid;
+        border: none !important;
+    }
+
+    .sheet-block:last-of-type {
+        page-break-after: auto;
+    }
+
+    /* Use the full page width for drawings when printing. */
+    .sheet-svg {
+        max-width: 100%;
+    }
+
+    /* Plain white background, no link underlining noise. */
+    body {
+        background: white;
+    }
+
+    a {
+        text-decoration: none;
+        color: inherit;
+    }
+}

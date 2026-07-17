@@ -1,0 +1,202 @@
+@page "/"
+@inject IDbContextFactory<AppDbContext> DbFactory
+@inject NavigationManager Nav
+
+@* ---------------------------------------------------------------------------
+   Home page: list of saved projects (cutlist jobs).
+   Create, rename, open and delete projects from here.
+--------------------------------------------------------------------------- *@
+
+<h1>Projects</h1>
+
+@if (errorMessage is not null)
+{
+    <div class="alert alert-danger">@errorMessage</div>
+}
+
+<div class="card mb-4" style="max-width: 500px;">
+    <div class="card-body">
+        <h5 class="card-title">New project</h5>
+        <div class="input-group">
+            <input class="form-control" placeholder="e.g. Kitchen cabinets"
+                   @bind="newProjectName" @bind:event="oninput" />
+            <button class="btn btn-primary" @onclick="CreateProject"
+                    disabled="@string.IsNullOrWhiteSpace(newProjectName)">
+                Create
+            </button>
+        </div>
+    </div>
+</div>
+
+@if (projects is null)
+{
+    <p>Loading...</p>
+}
+else if (projects.Count == 0)
+{
+    <p class="text-muted">No projects yet. Create one above to get started.</p>
+}
+else
+{
+    <table class="table table-hover align-middle" style="max-width: 900px;">
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Created</th>
+                <th>Parts</th>
+                <th style="width: 260px;"></th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var project in projects)
+            {
+                <tr>
+                    <td>
+                        @if (renamingId == project.Id)
+                        {
+                            <input class="form-control form-control-sm d-inline-block" style="max-width: 250px;"
+                                   @bind="renameText" />
+                        }
+                        else
+                        {
+                            <a href="/project/@project.Id"><strong>@project.Name</strong></a>
+                        }
+                    </td>
+                    <td>@project.CreatedDate.ToLocalTime().ToString("yyyy-MM-dd")</td>
+                    <td>@project.Parts.Count row(s)</td>
+                    <td class="text-end">
+                        @if (renamingId == project.Id)
+                        {
+                            <button class="btn btn-sm btn-success me-1" @onclick="() => SaveRename(project)">Save</button>
+                            <button class="btn btn-sm btn-secondary" @onclick="() => renamingId = null">Cancel</button>
+                        }
+                        else
+                        {
+                            <button class="btn btn-sm btn-outline-primary me-1"
+                                    @onclick="@(() => Nav.NavigateTo($"/project/{project.Id}"))">
+                                Open
+                            </button>
+                            <button class="btn btn-sm btn-outline-secondary me-1"
+                                    @onclick="() => StartRename(project)">
+                                Rename
+                            </button>
+                            @if (confirmingDeleteId == project.Id)
+                            {
+                                <button class="btn btn-sm btn-danger me-1" @onclick="() => DeleteProject(project)">Really delete?</button>
+                                <button class="btn btn-sm btn-secondary" @onclick="() => confirmingDeleteId = null">Cancel</button>
+                            }
+                            else
+                            {
+                                <button class="btn btn-sm btn-outline-danger"
+                                        @onclick="() => confirmingDeleteId = project.Id">
+                                    Delete
+                                </button>
+                            }
+                        }
+                    </td>
+                </tr>
+            }
+        </tbody>
+    </table>
+}
+
+@code {
+    private List<Project>? projects;
+    private string newProjectName = "";
+    private int? renamingId;
+    private string renameText = "";
+    private int? confirmingDeleteId;
+    private string? errorMessage;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadProjectsAsync();
+    }
+
+    private async Task LoadProjectsAsync()
+    {
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            projects = await db.Projects
+                .Include(p => p.Parts)          // so we can show the part count
+                .OrderByDescending(p => p.CreatedDate)
+                .ToListAsync();
+        }
+        catch (Exception ex)
+        {
+            errorMessage = "Could not load projects: " + ex.Message;
+        }
+    }
+
+    private async Task CreateProject()
+    {
+        if (string.IsNullOrWhiteSpace(newProjectName)) return;
+
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            var project = new Project { Name = newProjectName.Trim() };
+            db.Projects.Add(project);
+            await db.SaveChangesAsync();
+
+            // Jump straight into the new project's cutlist editor.
+            Nav.NavigateTo($"/project/{project.Id}");
+        }
+        catch (Exception ex)
+        {
+            errorMessage = "Could not create the project: " + ex.Message;
+        }
+    }
+
+    private void StartRename(Project project)
+    {
+        renamingId = project.Id;
+        renameText = project.Name;
+        confirmingDeleteId = null;
+    }
+
+    private async Task SaveRename(Project project)
+    {
+        if (string.IsNullOrWhiteSpace(renameText)) return;
+
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            var tracked = await db.Projects.FindAsync(project.Id);
+            if (tracked is not null)
+            {
+                tracked.Name = renameText.Trim();
+                await db.SaveChangesAsync();
+            }
+            renamingId = null;
+            await LoadProjectsAsync();
+        }
+        catch (Exception ex)
+        {
+            errorMessage = "Could not rename the project: " + ex.Message;
+        }
+    }
+
+    private async Task DeleteProject(Project project)
+    {
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            var tracked = await db.Projects.FindAsync(project.Id);
+            if (tracked is not null)
+            {
+                // Parts and saved results are removed automatically
+                // (cascade delete). Offcuts in inventory are kept.
+                db.Projects.Remove(tracked);
+                await db.SaveChangesAsync();
+            }
+            confirmingDeleteId = null;
+            await LoadProjectsAsync();
+        }
+        catch (Exception ex)
+        {
+            errorMessage = "Could not delete the project: " + ex.Message;
+        }
+    }
+}

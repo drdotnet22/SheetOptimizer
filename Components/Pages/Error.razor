@@ -1,0 +1,11 @@
+@page "/Error"
+
+@* Friendly error page shown in production when something goes wrong
+   (wired up in Program.cs via UseExceptionHandler). *@
+
+<h1 class="text-danger">Something went wrong</h1>
+<p>An unexpected error occurred. Try going back to the <a href="/">project list</a>.</p>
+<p class="text-muted">
+    If this keeps happening, check the app logs:
+    <code>docker compose logs -f app</code>
+</p>

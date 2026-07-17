@@ -1,0 +1,236 @@
+@page "/partial-sheets"
+@inject IDbContextFactory<AppDbContext> DbFactory
+
+@* ---------------------------------------------------------------------------
+   Partial-sheet inventory: the leftover material in your shop.
+   The optimizer automatically checks this list before using new full sheets.
+--------------------------------------------------------------------------- *@
+
+<h1>Partial Sheet Inventory</h1>
+<p class="text-muted">
+    Leftover pieces the optimizer may use before opening a new full sheet.
+    Length is the dimension along the grain.
+</p>
+
+@if (statusMessage is not null)
+{
+    <div class="alert alert-success">@statusMessage</div>
+}
+@if (errorMessage is not null)
+{
+    <div class="alert alert-danger">@errorMessage</div>
+}
+
+@* ----------------------- Add new ----------------------- *@
+<div class="card mb-4">
+    <div class="card-body">
+        <h5 class="card-title">Add a partial sheet</h5>
+        <div class="row g-2 align-items-end" style="max-width: 1000px;">
+            <div class="col-md-3">
+                <label class="form-label">Material</label>
+                <input class="form-control" @bind="newSheet.Material" placeholder="e.g. 3/4 Birch Plywood" />
+            </div>
+            <div class="col-md-2">
+                <label class="form-label">Width (in)</label>
+                <input type="number" class="form-control" step="0.0625" min="0" @bind="newSheet.Width" />
+            </div>
+            <div class="col-md-2">
+                <label class="form-label">Length (in)</label>
+                <input type="number" class="form-control" step="0.0625" min="0" @bind="newSheet.Length" />
+            </div>
+            <div class="col-md-1">
+                <label class="form-label">Qty</label>
+                <input type="number" class="form-control" min="1" @bind="newSheet.Quantity" />
+            </div>
+            <div class="col-md-3">
+                <label class="form-label">Notes</label>
+                <input class="form-control" @bind="newSheet.Notes" placeholder="(optional)" />
+            </div>
+            <div class="col-md-1">
+                <button class="btn btn-primary w-100" @onclick="AddSheetAsync">Add</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+@* ----------------------- List / edit ----------------------- *@
+@if (sheets is null)
+{
+    <p>Loading...</p>
+}
+else if (sheets.Count == 0)
+{
+    <p class="text-muted">
+        Inventory is empty. Add leftovers manually above, or save offcuts
+        from a project's results page after running the optimizer.
+    </p>
+}
+else
+{
+    <table class="table table-hover align-middle" style="max-width: 1100px;">
+        <thead>
+            <tr>
+                <th>Material</th>
+                <th>Width (in)</th>
+                <th>Length (in)</th>
+                <th>Qty</th>
+                <th>Added</th>
+                <th>Notes</th>
+                <th style="width: 200px;"></th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var sheet in sheets)
+            {
+                <tr>
+                    @if (editingId == sheet.Id)
+                    {
+                        <td><input class="form-control form-control-sm" @bind="sheet.Material" /></td>
+                        <td><input type="number" class="form-control form-control-sm" step="0.0625" min="0" @bind="sheet.Width" /></td>
+                        <td><input type="number" class="form-control form-control-sm" step="0.0625" min="0" @bind="sheet.Length" /></td>
+                        <td><input type="number" class="form-control form-control-sm" min="1" @bind="sheet.Quantity" /></td>
+                        <td>@sheet.DateAdded.ToLocalTime().ToString("yyyy-MM-dd")</td>
+                        <td><input class="form-control form-control-sm" @bind="sheet.Notes" /></td>
+                        <td class="text-end">
+                            <button class="btn btn-sm btn-success me-1" @onclick="() => SaveEditAsync(sheet)">Save</button>
+                            <button class="btn btn-sm btn-secondary" @onclick="CancelEditAsync">Cancel</button>
+                        </td>
+                    }
+                    else
+                    {
+                        <td>@sheet.Material</td>
+                        <td>@sheet.Width.ToString("0.###")</td>
+                        <td>@sheet.Length.ToString("0.###")</td>
+                        <td>@sheet.Quantity</td>
+                        <td>@sheet.DateAdded.ToLocalTime().ToString("yyyy-MM-dd")</td>
+                        <td>@sheet.Notes</td>
+                        <td class="text-end">
+                            <button class="btn btn-sm btn-outline-secondary me-1" @onclick="() => editingId = sheet.Id">Edit</button>
+                            @if (confirmingDeleteId == sheet.Id)
+                            {
+                                <button class="btn btn-sm btn-danger me-1" @onclick="() => DeleteSheetAsync(sheet)">Really delete?</button>
+                                <button class="btn btn-sm btn-secondary" @onclick="() => confirmingDeleteId = null">Cancel</button>
+                            }
+                            else
+                            {
+                                <button class="btn btn-sm btn-outline-danger" @onclick="() => confirmingDeleteId = sheet.Id">Delete</button>
+                            }
+                        </td>
+                    }
+                </tr>
+            }
+        </tbody>
+    </table>
+}
+
+@code {
+    private List<PartialSheet>? sheets;
+    private PartialSheet newSheet = MakeBlank();
+    private int? editingId;
+    private int? confirmingDeleteId;
+    private string? statusMessage;
+    private string? errorMessage;
+
+    private static PartialSheet MakeBlank() => new() { Quantity = 1 };
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            sheets = await db.PartialSheets
+                .OrderBy(s => s.Material).ThenByDescending(s => s.Width * s.Length)
+                .ToListAsync();
+        }
+        catch (Exception ex)
+        {
+            errorMessage = "Could not load the inventory: " + ex.Message;
+        }
+    }
+
+    private bool Validate(PartialSheet sheet)
+    {
+        errorMessage = null;
+        if (string.IsNullOrWhiteSpace(sheet.Material)) errorMessage = "Material is required.";
+        else if (sheet.Width <= 0 || sheet.Length <= 0) errorMessage = "Width and length must be greater than zero.";
+        else if (sheet.Quantity <= 0) errorMessage = "Quantity must be at least 1.";
+        return errorMessage is null;
+    }
+
+    private async Task AddSheetAsync()
+    {
+        statusMessage = null;
+        if (!Validate(newSheet)) return;
+
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            newSheet.Material = newSheet.Material.Trim();
+            newSheet.DateAdded = DateTime.UtcNow;
+            db.PartialSheets.Add(newSheet);
+            await db.SaveChangesAsync();
+
+            statusMessage = "Partial sheet added.";
+            newSheet = MakeBlank();
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            errorMessage = "Could not add the partial sheet: " + ex.Message;
+        }
+    }
+
+    private async Task SaveEditAsync(PartialSheet sheet)
+    {
+        statusMessage = null;
+        if (!Validate(sheet)) return;
+
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            sheet.Material = sheet.Material.Trim();
+            db.PartialSheets.Update(sheet);
+            await db.SaveChangesAsync();
+
+            editingId = null;
+            statusMessage = "Saved.";
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            errorMessage = "Could not save the change: " + ex.Message;
+        }
+    }
+
+    private async Task CancelEditAsync()
+    {
+        editingId = null;
+        await LoadAsync(); // throw away unsaved edits by reloading from the database
+    }
+
+    private async Task DeleteSheetAsync(PartialSheet sheet)
+    {
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            var tracked = await db.PartialSheets.FindAsync(sheet.Id);
+            if (tracked is not null)
+            {
+                db.PartialSheets.Remove(tracked);
+                await db.SaveChangesAsync();
+            }
+            confirmingDeleteId = null;
+            statusMessage = "Deleted.";
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            errorMessage = "Could not delete: " + ex.Message;
+        }
+    }
+}

@@ -1,0 +1,6 @@
+Quantity,Width,Length,Material,GrainMatters,Label
+4,24,34.5,3/4 Birch Plywood,true,Cabinet Side
+2,22.5,34.5,3/4 Birch Plywood,yes,Back Panel
+6,22.5,23,3/4 Birch Plywood,0,Shelf
+2,3,30,3/4 Birch Plywood,no,Stretcher
+1,20,60,1/2 MDF,false,Template Blank

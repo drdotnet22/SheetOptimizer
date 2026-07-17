@@ -1,0 +1,11 @@
+# Build output
+bin/
+obj/
+
+# IDE
+.vs/
+.vscode/
+*.user
+
+# Secrets - the real .env stays local; commit .env.example instead.
+.env

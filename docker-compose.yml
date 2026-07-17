@@ -1,0 +1,51 @@
+# ---------------------------------------------------------------------------
+# Runs the whole stack: the Blazor app + PostgreSQL.
+#
+#   Start everything:   docker compose up --build
+#   Follow app logs:    docker compose logs -f app
+#   Stop everything:    docker compose down
+#
+# Credentials come from the .env file next to this file
+# (copy .env.example to .env first).
+# ---------------------------------------------------------------------------
+
+services:
+
+  # ---------------- PostgreSQL ----------------
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      # Named volume: the database survives container rebuilds/restarts.
+      # See it with: docker volume inspect gcw-sheet-optimizer_pgdata
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # "Am I ready to accept connections?" - the app waits for this.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ---------------- Blazor app ----------------
+  app:
+    build: .
+    restart: unless-stopped
+    ports:
+      # Open http://localhost:8080 in your browser.
+      - "8080:8080"
+    environment:
+      # Note the host is "db" - the service name above acts as the hostname
+      # on Docker's internal network (NOT localhost).
+      ConnectionStrings__DefaultConnection: "Host=db;Port=5432;Database=${POSTGRES_DB};Username=${POSTGRES_USER};Password=${POSTGRES_PASSWORD}"
+      ASPNETCORE_ENVIRONMENT: "Production"
+    depends_on:
+      db:
+        # Don't start the app until Postgres reports healthy.
+        condition: service_healthy
+
+volumes:
+  pgdata:

@@ -1,0 +1,7 @@
+# Keep build context small and avoid leaking local files into the image.
+bin/
+obj/
+.git/
+.env
+*.md
+docker-compose.yml
