@@ -14,10 +14,15 @@ namespace GcwSheetOptimizer.Services.Nesting;
 /// <summary>Settings for one optimizer run.</summary>
 public class NestingOptions
 {
-    /// <summary>Full sheet width in inches (across the grain).</summary>
+    /// <summary>
+    /// Full sheet width in inches (across the grain). This is the DEFAULT,
+    /// used for materials that have no entry in the stock material list -
+    /// matched stock materials use their own sheet size instead.
+    /// </summary>
     public decimal SheetWidth { get; set; } = 48m;
 
-    /// <summary>Full sheet length in inches (along the grain).</summary>
+    /// <summary>Full sheet length in inches (along the grain). Default -
+    /// see <see cref="SheetWidth"/> for how stock materials override it.</summary>
     public decimal SheetLength { get; set; } = 96m;
 
     /// <summary>

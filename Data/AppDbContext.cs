@@ -18,6 +18,7 @@ public class AppDbContext : DbContext
     public DbSet<Part> Parts => Set<Part>();
     public DbSet<PartialSheet> PartialSheets => Set<PartialSheet>();
     public DbSet<NestingResult> NestingResults => Set<NestingResult>();
+    public DbSet<StockMaterial> StockMaterials => Set<StockMaterial>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -50,6 +51,13 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<Part>().Property(p => p.Material).IsRequired();
         modelBuilder.Entity<PartialSheet>().Property(p => p.Material).IsRequired();
         modelBuilder.Entity<NestingResult>().Property(r => r.ResultDataJson).IsRequired();
+
+        // --- Stock materials: names must be unique so the "exact match to
+        //     part material" rule is never ambiguous. ---
+        modelBuilder.Entity<StockMaterial>().Property(s => s.Name).IsRequired();
+        modelBuilder.Entity<StockMaterial>()
+            .HasIndex(s => s.Name)
+            .IsUnique();
 
         // ------------------------------------------------------------------
         // DEVELOPMENT SEED DATA (commented out on purpose - the app starts

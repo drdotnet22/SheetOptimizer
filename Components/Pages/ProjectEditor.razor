@@ -114,6 +114,19 @@ else
         the optimizer gives the real count).
     </div>
 
+    @* Warn when a material doesn't match the stock list, since it will
+       fall back to the default 48 x 96 sheet size. *@
+    @if (UnmatchedMaterials.Count > 0)
+    {
+        <div class="alert alert-warning">
+            No <a href="/materials">stock material</a> entry matches:
+            <strong>@string.Join(", ", UnmatchedMaterials)</strong>.
+            The optimizer will assume the default 48&quot; x 96&quot; sheet size for
+            @(UnmatchedMaterials.Count == 1 ? "it" : "them").
+            (Names must match exactly, ignoring case.)
+        </div>
+    }
+
     @* ----------------------- Actions ----------------------- *@
     <div class="d-flex gap-2 mb-5">
         <button class="btn btn-primary" @onclick="SaveAllAsync">Save changes</button>
@@ -136,6 +149,17 @@ else
     private string? statusMessage;
     private string? errorMessage;
 
+    // Stock material names (lowercased), for the "unmatched material" warning.
+    private HashSet<string> stockMaterialNames = new();
+
+    /// <summary>Distinct part materials with no stock-list match.</summary>
+    private List<string> UnmatchedMaterials => parts
+        .Select(p => p.Material.Trim())
+        .Where(m => m.Length > 0 && !stockMaterialNames.Contains(m.ToLowerInvariant()))
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .OrderBy(m => m)
+        .ToList();
+
     // --- Running totals (recomputed on every render - lists are small) ---
     private int TotalPieces => parts.Sum(p => Math.Max(0, p.Quantity));
     private decimal TotalSquareFeet => parts.Sum(p => Math.Max(0, p.Quantity) * p.Width * p.Length) / 144m;
@@ -155,6 +179,11 @@ else
         }
 
         parts = project.Parts.OrderBy(p => p.Id).ToList();
+
+        // Load stock material names for the "unmatched material" warning.
+        stockMaterialNames = (await db.StockMaterials.Select(s => s.Name).ToListAsync())
+            .Select(n => n.Trim().ToLowerInvariant())
+            .ToHashSet();
     }
 
     // ----------------------- Grid actions -----------------------
@@ -307,7 +336,11 @@ else
                 .Where(ps => ps.Quantity > 0)
                 .ToListAsync();
 
-            var solution = Nester.Nest(parts, project!.KerfWidth, inventory, new NestingOptions());
+            // Stock list supplies the real sheet size per material
+            // (e.g. oversized 48.5 x 96.5 plywood).
+            var stockMaterials = await db.StockMaterials.ToListAsync();
+
+            var solution = Nester.Nest(parts, project!.KerfWidth, inventory, new NestingOptions(), stockMaterials);
 
             // Keep only the most recent result per project.
             var oldResults = await db.NestingResults.Where(r => r.ProjectId == Id).ToListAsync();

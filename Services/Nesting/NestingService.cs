@@ -141,13 +141,22 @@ public class NestingService
     /// reports which partial sheets were used, and the UI asks the user
     /// to confirm consuming them.
     /// </param>
-    /// <param name="options">Sheet size and offcut settings.</param>
+    /// <param name="options">Default sheet size and offcut settings.</param>
+    /// <param name="stockMaterials">
+    /// The standard stock list. If a cutlist material's name exactly matches
+    /// a stock material (ignoring case/spaces), that stock entry's sheet size
+    /// is used for new full sheets - e.g. oversized 48.5" x 96.5" plywood.
+    /// Materials with no match fall back to the default in
+    /// <paramref name="options"/> (48" x 96").
+    /// </param>
     public NestingSolution Nest(
         List<Part> parts,
         decimal kerfWidth,
         List<PartialSheet> partialSheetInventory,
-        NestingOptions options)
+        NestingOptions options,
+        List<StockMaterial>? stockMaterials = null)
     {
+        stockMaterials ??= new List<StockMaterial>();
         var solution = new NestingSolution
         {
             KerfWidth = kerfWidth,
@@ -161,6 +170,22 @@ public class NestingService
 
         foreach (var group in materialGroups)
         {
+            // --- Resolve the full-sheet size for this material -------------
+            // Exact name match (trimmed, case-insensitive) against the stock
+            // list; no match means the default 48 x 96.
+            var stock = stockMaterials.FirstOrDefault(s =>
+                s.Name.Trim().Equals(group.Key, StringComparison.OrdinalIgnoreCase));
+
+            // Copy the options so each material can have its own sheet size
+            // without the materials interfering with each other.
+            var materialOptions = new NestingOptions
+            {
+                SheetWidth = stock?.SheetWidth ?? options.SheetWidth,
+                SheetLength = stock?.SheetLength ?? options.SheetLength,
+                MinOffcutWidth = options.MinOffcutWidth,
+                MinOffcutLength = options.MinOffcutLength,
+            };
+
             // Does this material even have partial sheets in inventory?
             // If not, the "ignore partials" variants would be identical
             // runs, so we skip them.
@@ -176,9 +201,9 @@ public class NestingService
             {
                 var candidate = NestOneMaterial(
                     group.Key, group.ToList(), kerfWidth,
-                    partialSheetInventory, options, strategy);
+                    partialSheetInventory, materialOptions, strategy);
 
-                var score = LayoutScore.Of(candidate, options);
+                var score = LayoutScore.Of(candidate, materialOptions);
 
                 if (bestScore is null || score.IsBetterThan(bestScore))
                 {

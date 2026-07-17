@@ -49,6 +49,7 @@ Models/                    EF Core entities (one class = one table)
   Project.cs               A cutlist job (name, kerf width)
   Part.cs                  One cutlist row (qty, W x L, material, grain)
   PartialSheet.cs          A leftover piece in your inventory
+  StockMaterial.cs         A standard sheet good you buy + its real sheet size
   NestingResult.cs         A saved optimizer run (layout stored as JSON)
 
 Data/
@@ -71,6 +72,7 @@ Components/
     Home.razor             /                    project list
     ProjectEditor.razor    /project/{id}         cutlist grid, CSV import, run optimizer
     ProjectResults.razor   /project/{id}/results layouts, print view, offcut saving
+    StockMaterials.razor   /materials            standard stock list w/ sheet sizes
     PartialSheets.razor    /partial-sheets       leftover inventory
 
 wwwroot/app.css            Custom styles incl. the @media print layout
@@ -97,7 +99,11 @@ The core is a **guillotine free-rectangle heuristic**:
 3. Each part is placed into the best free rect across all open sheets - trying both orientations when `GrainMatters` is false.
 4. After placing a part in a rect's corner, the remaining L-shape is split into two rectangles with **one straight edge-to-edge cut**. Because every split is a single straight cut, the whole layout can always be produced with full-length table-saw cuts (the guillotine constraint holds by construction).
 5. The **kerf** (blade thickness, set per project) is added to each part's footprint when splitting, so adjacent parts are spaced one blade-width apart.
-6. When a part fits on no open sheet, a new one is opened. The **partial-sheet inventory is checked first**: among partial sheets of the right material large enough for the part, the *smallest* one is chosen (best-fit - this deliberately saves your large leftovers for jobs that need them). Only if none fits is a fresh 48" x 96" sheet used.
+6. When a part fits on no open sheet, a new one is opened. The **partial-sheet inventory is checked first**: among partial sheets of the right material large enough for the part, the *smallest* one is chosen (best-fit - this deliberately saves your large leftovers for jobs that need them). Only if none fits is a fresh full sheet used.
+
+### Stock materials and sheet sizes
+
+Not all sheet goods are the same size - some plywood comes oversized (48.5" x 96.5"), some exactly 48" x 96". The **Stock Materials** page (`/materials`) is where you list the materials you buy and their real sheet sizes. When the optimizer runs, each cutlist material is matched against this list **by exact name** (ignoring case and surrounding spaces): a match means new full sheets for that material use the stock entry's size; no match falls back to the default 48" x 96". The cutlist editor warns you when a material in your list has no stock entry, so typos ("3/4 Birch Ply" vs "3/4 Birch Plywood") are easy to spot before optimizing.
 
 ### The strategy batch
 

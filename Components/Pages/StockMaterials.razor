@@ -1,0 +1,230 @@
+@page "/materials"
+@inject IDbContextFactory<AppDbContext> DbFactory
+
+@* ---------------------------------------------------------------------------
+   Standard stock material list: the sheet goods you actually buy, with
+   their REAL sheet sizes (some plywood is oversized, e.g. 48.5" x 96.5").
+
+   The optimizer matches a part's Material text against Name here (exact
+   match, ignoring case/spaces) to know what size a new full sheet is.
+   Materials without a match use the default 48" x 96".
+--------------------------------------------------------------------------- *@
+
+<h1>Stock Materials</h1>
+<p class="text-muted">
+    The sheet size entered here is used by the optimizer whenever a part's
+    material name matches <strong>exactly</strong> (case doesn't matter).
+    Unlisted materials are assumed to be 48&quot; x 96&quot;.
+</p>
+
+@if (statusMessage is not null)
+{
+    <div class="alert alert-success">@statusMessage</div>
+}
+@if (errorMessage is not null)
+{
+    <div class="alert alert-danger">@errorMessage</div>
+}
+
+@* ----------------------- Add new ----------------------- *@
+<div class="card mb-4">
+    <div class="card-body">
+        <h5 class="card-title">Add a stock material</h5>
+        <div class="row g-2 align-items-end" style="max-width: 1000px;">
+            <div class="col-md-4">
+                <label class="form-label">Name (must match part material text)</label>
+                <input class="form-control" @bind="newMaterial.Name" placeholder="e.g. 3/4 Birch Plywood" />
+            </div>
+            <div class="col-md-2">
+                <label class="form-label">Sheet width (in)</label>
+                <input type="number" class="form-control" step="0.0625" min="0" @bind="newMaterial.SheetWidth" />
+            </div>
+            <div class="col-md-2">
+                <label class="form-label">Sheet length (in)</label>
+                <input type="number" class="form-control" step="0.0625" min="0" @bind="newMaterial.SheetLength" />
+            </div>
+            <div class="col-md-3">
+                <label class="form-label">Notes</label>
+                <input class="form-control" @bind="newMaterial.Notes" placeholder="(optional)" />
+            </div>
+            <div class="col-md-1">
+                <button class="btn btn-primary w-100" @onclick="AddMaterialAsync">Add</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+@* ----------------------- List / edit ----------------------- *@
+@if (materials is null)
+{
+    <p>Loading...</p>
+}
+else if (materials.Count == 0)
+{
+    <p class="text-muted">No stock materials yet. Add the sheet goods you typically buy above.</p>
+}
+else
+{
+    <table class="table table-hover align-middle" style="max-width: 1000px;">
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Sheet width (in)</th>
+                <th>Sheet length (in)</th>
+                <th>Notes</th>
+                <th style="width: 200px;"></th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var material in materials)
+            {
+                <tr>
+                    @if (editingId == material.Id)
+                    {
+                        <td><input class="form-control form-control-sm" @bind="material.Name" /></td>
+                        <td><input type="number" class="form-control form-control-sm" step="0.0625" min="0" @bind="material.SheetWidth" /></td>
+                        <td><input type="number" class="form-control form-control-sm" step="0.0625" min="0" @bind="material.SheetLength" /></td>
+                        <td><input class="form-control form-control-sm" @bind="material.Notes" /></td>
+                        <td class="text-end">
+                            <button class="btn btn-sm btn-success me-1" @onclick="() => SaveEditAsync(material)">Save</button>
+                            <button class="btn btn-sm btn-secondary" @onclick="CancelEditAsync">Cancel</button>
+                        </td>
+                    }
+                    else
+                    {
+                        <td><strong>@material.Name</strong></td>
+                        <td>@material.SheetWidth.ToString("0.###")</td>
+                        <td>@material.SheetLength.ToString("0.###")</td>
+                        <td>@material.Notes</td>
+                        <td class="text-end">
+                            <button class="btn btn-sm btn-outline-secondary me-1" @onclick="() => editingId = material.Id">Edit</button>
+                            @if (confirmingDeleteId == material.Id)
+                            {
+                                <button class="btn btn-sm btn-danger me-1" @onclick="() => DeleteMaterialAsync(material)">Really delete?</button>
+                                <button class="btn btn-sm btn-secondary" @onclick="() => confirmingDeleteId = null">Cancel</button>
+                            }
+                            else
+                            {
+                                <button class="btn btn-sm btn-outline-danger" @onclick="() => confirmingDeleteId = material.Id">Delete</button>
+                            }
+                        </td>
+                    }
+                </tr>
+            }
+        </tbody>
+    </table>
+}
+
+@code {
+    private List<StockMaterial>? materials;
+    private StockMaterial newMaterial = MakeBlank();
+    private int? editingId;
+    private int? confirmingDeleteId;
+    private string? statusMessage;
+    private string? errorMessage;
+
+    private static StockMaterial MakeBlank() => new() { SheetWidth = 48m, SheetLength = 96m };
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            materials = await db.StockMaterials.OrderBy(m => m.Name).ToListAsync();
+        }
+        catch (Exception ex)
+        {
+            errorMessage = "Could not load the stock materials: " + ex.Message;
+        }
+    }
+
+    private bool Validate(StockMaterial material)
+    {
+        errorMessage = null;
+        if (string.IsNullOrWhiteSpace(material.Name))
+            errorMessage = "Name is required.";
+        else if (material.SheetWidth <= 0 || material.SheetLength <= 0)
+            errorMessage = "Sheet width and length must be greater than zero.";
+        else if (materials is not null && materials.Any(m =>
+                     m.Id != material.Id &&
+                     m.Name.Trim().Equals(material.Name.Trim(), StringComparison.OrdinalIgnoreCase)))
+            errorMessage = $"A stock material named \"{material.Name.Trim()}\" already exists.";
+        return errorMessage is null;
+    }
+
+    private async Task AddMaterialAsync()
+    {
+        statusMessage = null;
+        if (!Validate(newMaterial)) return;
+
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            newMaterial.Name = newMaterial.Name.Trim();
+            db.StockMaterials.Add(newMaterial);
+            await db.SaveChangesAsync();
+
+            statusMessage = "Stock material added.";
+            newMaterial = MakeBlank();
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            errorMessage = "Could not add the stock material: " + ex.Message;
+        }
+    }
+
+    private async Task SaveEditAsync(StockMaterial material)
+    {
+        statusMessage = null;
+        if (!Validate(material)) return;
+
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            material.Name = material.Name.Trim();
+            db.StockMaterials.Update(material);
+            await db.SaveChangesAsync();
+
+            editingId = null;
+            statusMessage = "Saved.";
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            errorMessage = "Could not save the change: " + ex.Message;
+        }
+    }
+
+    private async Task CancelEditAsync()
+    {
+        editingId = null;
+        await LoadAsync(); // throw away unsaved edits by reloading from the database
+    }
+
+    private async Task DeleteMaterialAsync(StockMaterial material)
+    {
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            var tracked = await db.StockMaterials.FindAsync(material.Id);
+            if (tracked is not null)
+            {
+                db.StockMaterials.Remove(tracked);
+                await db.SaveChangesAsync();
+            }
+            confirmingDeleteId = null;
+            statusMessage = "Deleted. Parts using this material will fall back to 48 x 96 sheets.";
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            errorMessage = "Could not delete: " + ex.Message;
+        }
+    }
+}
