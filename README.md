@@ -4,7 +4,7 @@ A Blazor Server app for optimizing plywood cutting on a table/panel saw. Import 
 
 ## Running the app (Docker - the normal way)
 
-You need Docker Desktop installed. Then:
+You need Docker Desktop installed as well as the .NET 10 SDK. Then:
 
 ```bash
 # 1. Create your .env file from the template (edit the password if you like)
