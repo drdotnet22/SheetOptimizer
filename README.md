@@ -2,17 +2,26 @@
 
 A Blazor Server app for optimizing plywood cutting on a table/panel saw. Import a cutlist from CSV, edit it in a grid, run a guillotine-cut nesting optimizer, print the sheet layouts, and keep an inventory of leftover partial sheets that the optimizer reuses on future jobs.
 
-## Running the app (Docker - the normal way)
+## Running the app
 
-You need Docker Desktop installed as well as the .NET 10 SDK. Then:
+### Prerequisites
+- Docker Compose
+- .NET 10 SDK - https://learn.microsoft.com/en-us/dotnet/core/install/linux-debian?tabs=dotnet10
 
+### Install
 ```bash
-# 1. Create your .env file from the template (edit the password if you like)
+# Clone repo
+git clone https://github.com/drdotnet22/SheetOptimizer/ && cd SheetOptimizer
+
+# Create your .env file from the template (edit the password if you like)
 copy .env.example .env        # Windows
 # cp .env.example .env        # macOS/Linux
 
-# 2. Build and start everything (app + PostgreSQL)
+# Build and start everything (app + PostgreSQL)
 docker compose up --build
+
+# Cean up build assets (Around 1.4GB)
+docker system prune
 ```
 
 Open **http://localhost:8080** in your browser.
@@ -20,6 +29,7 @@ Open **http://localhost:8080** in your browser.
 Other useful commands:
 
 ```bash
+git pull && docker compose up -d --build && docker system prune -f # Pull updates, rebuild, and clean up build assets
 docker compose logs -f app    # watch the app's logs
 docker compose down           # stop everything (data is kept)
 docker compose down -v        # stop AND wipe the database volume
