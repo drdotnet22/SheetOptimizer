@@ -31,6 +31,22 @@ public class NestingOptions
     /// </summary>
     public decimal MinOffcutWidth { get; set; } = 12m;
     public decimal MinOffcutLength { get; set; } = 12m;
+
+    /// <summary>
+    /// How many extra RANDOMIZED runs to add to the batch per material, on
+    /// top of the ~48 deterministic strategy combinations. More runs =
+    /// better layouts but slower. 400 keeps a few-hundred-part cutlist
+    /// around a second or two. Uses a fixed random seed, so the same
+    /// cutlist always produces the same result.
+    /// </summary>
+    public int ExtraRandomRuns { get; set; } = 400;
+
+    /// <summary>
+    /// Two layouts whose small-scrap area differs by less than this many
+    /// square inches count as "equally efficient", and the one needing
+    /// FEWER SAW CUTS wins instead. Default: 144 (one square foot).
+    /// </summary>
+    public decimal CutTieScrapTolerance { get; set; } = 144m;
 }
 
 /// <summary>The complete result of one optimizer run.</summary>
@@ -79,6 +95,13 @@ public class SheetLayout
     public int? SourcePartialSheetId { get; set; }
 
     public List<PlacedPart> Parts { get; set; } = new();
+
+    /// <summary>
+    /// Approximate number of saw cuts needed to produce this sheet's parts
+    /// (each placement needs up to two cuts to free the part; a part edge
+    /// flush with the sheet/region edge needs no cut there).
+    /// </summary>
+    public int CutCount { get; set; }
 
     /// <summary>
     /// Unused rectangular regions left over after all cuts.

@@ -92,6 +92,7 @@ else
             (@material.Sheets.Count(s => !s.IsPartialSheet) full,
             @material.Sheets.Count(s => s.IsPartialSheet) from partial inventory)
             &mdash; material used: @Utilization(material).ToString("0")%
+            &mdash; ~@material.Sheets.Sum(s => s.CutCount) saw cuts
             @if (!string.IsNullOrEmpty(material.StrategyName))
             {
                 <span> &mdash; winning strategy: @material.StrategyName</span>
@@ -104,6 +105,7 @@ else
                 <div class="card-header">
                     <strong>Sheet @sheet.SheetNumber</strong> &mdash; @material.Material,
                     @FormatDim(sheet.SheetWidth)&quot; x @FormatDim(sheet.SheetLength)&quot;
+                    <span class="text-muted">&middot; ~@sheet.CutCount cuts</span>
                     @if (sheet.IsPartialSheet)
                     {
                         <span class="badge bg-info ms-2">partial sheet from inventory</span>

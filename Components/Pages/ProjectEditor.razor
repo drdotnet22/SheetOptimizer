@@ -340,7 +340,10 @@ else
             // (e.g. oversized 48.5 x 96.5 plywood).
             var stockMaterials = await db.StockMaterials.ToListAsync();
 
-            var solution = Nester.Nest(parts, project!.KerfWidth, inventory, new NestingOptions(), stockMaterials);
+            // Task.Run keeps the page responsive - the batch (including the
+            // randomized restarts) can take a couple of seconds on big lists.
+            var solution = await Task.Run(() =>
+                Nester.Nest(parts, project!.KerfWidth, inventory, new NestingOptions(), stockMaterials));
 
             // Keep only the most recent result per project.
             var oldResults = await db.NestingResults.Where(r => r.ProjectId == Id).ToListAsync();

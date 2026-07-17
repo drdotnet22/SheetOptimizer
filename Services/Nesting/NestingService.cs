@@ -76,6 +76,10 @@ public class NestingService
         LongestSideDesc,    // longest single edge first (helps long thin parts)
         ShortestSideDesc,   // widest "short edge" first (helps chunky parts)
         PerimeterDesc,      // biggest perimeter first (a blend of the above)
+
+        // The two RANDOMIZED orders (used by the extra restart runs):
+        NoisyAreaDesc,      // area order, but each area is nudged +/-20% randomly
+        Shuffled,           // completely random order
     }
 
     /// <summary>Among all free rects a part fits in, which one do we pick?</summary>
@@ -93,12 +97,14 @@ public class NestingService
         KeepSmallerLeftoverWhole, // the smaller leftover stays one piece
     }
 
-    /// <summary>One full strategy = one candidate run of the optimizer.</summary>
+    /// <summary>One full strategy = one candidate run of the optimizer.
+    /// Seed only matters for the randomized sort rules.</summary>
     private sealed record Strategy(
         PartSortRule Sort,
         PlacementRule Placement,
         SplitRule Split,
-        bool UsePartialSheets)
+        bool UsePartialSheets,
+        int Seed = 0)
     {
         public string DisplayName =>
             $"{SortName} / {PlacementName} / {SplitName}" +
@@ -109,7 +115,9 @@ public class NestingService
             PartSortRule.AreaDesc => "sort by area",
             PartSortRule.LongestSideDesc => "sort by longest side",
             PartSortRule.ShortestSideDesc => "sort by shortest side",
-            _ => "sort by perimeter",
+            PartSortRule.PerimeterDesc => "sort by perimeter",
+            PartSortRule.NoisyAreaDesc => "randomized area order",
+            _ => "random order",
         };
 
         private string PlacementName => Placement switch
@@ -197,7 +205,7 @@ public class NestingService
             LayoutScore? bestScore = null;
 
             // --- THE BATCH: try every strategy, keep the best result. ---
-            foreach (var strategy in AllStrategies(hasPartials))
+            foreach (var strategy in AllStrategies(hasPartials, options.ExtraRandomRuns))
             {
                 var candidate = NestOneMaterial(
                     group.Key, group.ToList(), kerfWidth,
@@ -218,10 +226,29 @@ public class NestingService
         return solution;
     }
 
-    /// <summary>Every strategy combination the batch will try.</summary>
-    private static IEnumerable<Strategy> AllStrategies(bool includeNoPartialsVariants)
+    /// <summary>The four deterministic (non-random) sort rules.</summary>
+    private static readonly PartSortRule[] DeterministicSorts =
     {
-        foreach (var sort in Enum.GetValues<PartSortRule>())
+        PartSortRule.AreaDesc,
+        PartSortRule.LongestSideDesc,
+        PartSortRule.ShortestSideDesc,
+        PartSortRule.PerimeterDesc,
+    };
+
+    /// <summary>
+    /// Every run the batch will try: first the full deterministic grid
+    /// (up to 48 combinations), then a wave of RANDOMIZED restarts.
+    ///
+    /// The randomized runs shake up the part order (and pick random
+    /// placement/split rules), which lets the batch escape layouts that
+    /// every deterministic rule happens to be bad at. The master seed is
+    /// FIXED, so clicking "run optimizer" twice on the same cutlist always
+    /// gives the same answer.
+    /// </summary>
+    private static IEnumerable<Strategy> AllStrategies(bool includeNoPartialsVariants, int extraRandomRuns)
+    {
+        // --- The deterministic grid --------------------------------------
+        foreach (var sort in DeterministicSorts)
             foreach (var placement in Enum.GetValues<PlacementRule>())
                 foreach (var split in Enum.GetValues<SplitRule>())
                 {
@@ -233,6 +260,20 @@ public class NestingService
                     if (includeNoPartialsVariants)
                         yield return new Strategy(sort, placement, split, UsePartialSheets: false);
                 }
+
+        // --- The randomized restarts -------------------------------------
+        var master = new Random(20260717); // fixed seed = reproducible results
+
+        for (var i = 0; i < extraRandomRuns; i++)
+        {
+            // Mostly gentle "noisy area" order, sometimes a full shuffle.
+            var sort = master.Next(3) == 0 ? PartSortRule.Shuffled : PartSortRule.NoisyAreaDesc;
+            var placement = (PlacementRule)master.Next(3);
+            var split = (SplitRule)master.Next(2);
+            var usePartials = !includeNoPartialsVariants || master.Next(4) > 0; // 75% use them
+
+            yield return new Strategy(sort, placement, split, usePartials, Seed: master.Next());
+        }
     }
 
     // =======================================================================
@@ -245,16 +286,26 @@ public class NestingService
         public int FullSheets;           // lower is better
         public decimal SheetAreaUsed;    // lower is better
         public decimal SmallScrapArea;   // lower is better
+        public int CutCount;             // lower is better (tie-breaker)
         public decimal LargestLeftover;  // HIGHER is better
+
+        /// <summary>Scrap differences below this count as "equally efficient"
+        /// so the cut count can decide (copied from NestingOptions).</summary>
+        public decimal ScrapTolerance;
 
         public static LayoutScore Of(MaterialNesting layout, NestingOptions options)
         {
-            var score = new LayoutScore { UnplacedCount = layout.UnplacedParts.Count };
+            var score = new LayoutScore
+            {
+                UnplacedCount = layout.UnplacedParts.Count,
+                ScrapTolerance = options.CutTieScrapTolerance,
+            };
 
             foreach (var sheet in layout.Sheets)
             {
                 if (!sheet.IsPartialSheet) score.FullSheets++;
                 score.SheetAreaUsed += sheet.SheetWidth * sheet.SheetLength;
+                score.CutCount += sheet.CutCount;
 
                 foreach (var leftover in sheet.Leftovers)
                 {
@@ -269,12 +320,22 @@ public class NestingService
             return score;
         }
 
-        /// <summary>Lexicographic comparison - earlier criteria win ties.</summary>
+        /// <summary>
+        /// Comparison - earlier criteria win ties. The scrap comparison is
+        /// "fuzzy": if two layouts' small-scrap areas are within the
+        /// tolerance of each other they count as equally efficient, and the
+        /// layout needing FEWER SAW CUTS wins.
+        /// </summary>
         public bool IsBetterThan(LayoutScore other)
         {
             if (UnplacedCount != other.UnplacedCount) return UnplacedCount < other.UnplacedCount;
             if (FullSheets != other.FullSheets) return FullSheets < other.FullSheets;
             if (SheetAreaUsed != other.SheetAreaUsed) return SheetAreaUsed < other.SheetAreaUsed;
+
+            var scrapDifference = SmallScrapArea - other.SmallScrapArea;
+            if (Math.Abs(scrapDifference) >= ScrapTolerance) return scrapDifference < 0;
+
+            if (CutCount != other.CutCount) return CutCount < other.CutCount;
             if (SmallScrapArea != other.SmallScrapArea) return SmallScrapArea < other.SmallScrapArea;
             return LargestLeftover > other.LargestLeftover;
         }
@@ -374,7 +435,7 @@ public class NestingService
         }
 
         // --- Sort according to this run's strategy ---------------------------
-        pieces = SortPieces(pieces, strategy.Sort);
+        pieces = SortPieces(pieces, strategy.Sort, strategy.Seed);
 
         // --- Track how many of each partial sheet are still available --------
         var partialStock = strategy.UsePartialSheets
@@ -458,8 +519,32 @@ public class NestingService
         return result;
     }
 
-    private static List<PieceToPlace> SortPieces(List<PieceToPlace> pieces, PartSortRule rule)
+    private static List<PieceToPlace> SortPieces(List<PieceToPlace> pieces, PartSortRule rule, int seed)
     {
+        // The two randomized orders (used by the restart runs).
+        if (rule == PartSortRule.NoisyAreaDesc)
+        {
+            // Biggest-first, but each part's area is nudged by +/-20% before
+            // sorting - a gentle reshuffle that keeps big parts mostly first.
+            var rng = new Random(seed);
+            return pieces
+                .OrderByDescending(p => (double)(p.Width * p.Length) * (0.8 + 0.4 * rng.NextDouble()))
+                .ToList();
+        }
+
+        if (rule == PartSortRule.Shuffled)
+        {
+            // Completely random order (Fisher-Yates shuffle).
+            var rng = new Random(seed);
+            var shuffled = pieces.ToList();
+            for (var i = shuffled.Count - 1; i > 0; i--)
+            {
+                var j = rng.Next(i + 1);
+                (shuffled[i], shuffled[j]) = (shuffled[j], shuffled[i]);
+            }
+            return shuffled;
+        }
+
         return rule switch
         {
             PartSortRule.AreaDesc => pieces
@@ -637,6 +722,13 @@ public class NestingService
             Length = best.PlacedH,
             Rotated = best.Rotated,
         });
+
+        // --- Count the saw cuts this placement needs -----------------------
+        // Freeing the part takes one cut per side that is NOT already flush
+        // with the edge of its free rectangle (a flush edge was cut earlier,
+        // or is the factory edge of the sheet).
+        if (best.PlacedW < rect.W) sheet.Layout.CutCount++;
+        if (best.PlacedH < rect.H) sheet.Layout.CutCount++;
 
         // --- Split the remaining space with ONE straight cut ---------------
         // The part occupies its own size PLUS one kerf on the far sides
