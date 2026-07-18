@@ -115,13 +115,22 @@ The core is a **guillotine free-rectangle heuristic**:
 
 Not all sheet goods are the same size - some plywood comes oversized (48.5" x 96.5"), some exactly 48" x 96". The **Stock Materials** page (`/materials`) is where you list the materials you buy and their real sheet sizes. When the optimizer runs, each cutlist material is matched against this list **by exact name** (ignoring case and surrounding spaces): a match means new full sheets for that material use the stock entry's size; no match falls back to the default 48" x 96". The cutlist editor warns you when a material in your list has no stock entry, so typos ("3/4 Birch Ply" vs "3/4 Birch Plywood") are easy to spot before optimizing.
 
+### Two construction modes
+
+Following how the bin-packing literature classifies heuristics, the optimizer builds layouts two different ways and lets the scoring pick the winner per material:
+
+- **Global (item-oriented) mode**: each part is placed on the best spot across *all* open sheets. Strong at minimizing the total sheet count, but tends to spread leftover material across every sheet.
+- **Sequential (bin-oriented) mode**: packs **one sheet at a time** as full as possible - every rule combination is tried on the current sheet, the fullest packing is committed, and the process repeats with the remaining parts. This reliably produces tightly packed early sheets with all the waste pooled on the final sheet as one large reusable piece.
+
+Neither mode wins on every cutlist (this matches published results on bin-oriented vs item-oriented heuristics), which is exactly why both run in the same batch.
+
 ### The strategy batch
 
 A single greedy heuristic is short-sighted, and no single rule wins on every cutlist. So each optimizer run is actually a **batch**: for every material, up to 48 deterministic candidate layouts are generated - every combination of 4 part sort orders (area / longest side / shortest side / perimeter), 3 placement rules (best area fit / best short-side fit / best long-side fit), 2 split rules (keep the bigger or the smaller leftover whole), and, when inventory exists, with/without partial sheets.
 
 On top of the deterministic grid, the batch adds **400 randomized restarts** per material: the part order is shaken up (mostly "noisy area order" - biggest-first with each area nudged ±20% - and sometimes a full shuffle) with random placement/split rules. This lets the batch escape layouts that every deterministic rule happens to be bad at, and regularly saves a sheet on larger cutlists. The random seed is fixed, so re-running on the same cutlist always gives the same answer. The count is configurable via `NestingOptions.ExtraRandomRuns` - a 400-piece cutlist runs the full ~450-run batch in about a second.
 
-The winning layout is picked by comparing, in order: fewest unplaced parts, fewest full sheets, least total sheet area, **least small-scrap area**, **biggest single leftover piece** (so waste consolidates into one large reusable offcut rather than confetti), then **fewest saw cuts**, and finally exact scrap / fragmentation numbers.
+The winning layout is picked by comparing, in order: fewest unplaced parts, fewest full sheets, least total sheet area, **emptiest least-filled sheet** (pack the other sheets tight and leave the last sheet nearly whole, rather than spreading waste across every sheet), **biggest single leftover piece**, **least small-scrap area**, then **fewest saw cuts**, and finally exact tie-breakers.
 
 The scrap and largest-leftover comparisons are done in coarse **buckets** of one square foot (`NestingOptions.CutTieScrapTolerance`): layouts in the same bucket count as "roughly equal", which is what lets the cut count matter between near-identical layouts without ever trading away real material efficiency. Buckets (rather than pairwise "within X of each other" checks) keep the comparison transitive - the winner is the same no matter what order the candidates are generated in. Estimated cut counts are shown per sheet and per material on the results page, alongside the winning strategy.
 
@@ -129,7 +138,9 @@ Grain convention: a part's **Length runs along the grain** (the 96" direction of
 
 ### Known limitations
 
-Each individual run is still greedy (no backtracking), so the batch winner is the best of 48 good attempts, not a guaranteed optimum. In practice it's close, and results always respect the guillotine, grain, and kerf constraints exactly.
+The 2D guillotine cutting-stock problem is NP-hard, so every practical optimizer (including commercial ones) uses heuristics. Each individual run here is greedy (no backtracking); the batch winner is the best of ~450 good attempts across both construction modes, not a guaranteed optimum. In practice it's close, and results always respect the guillotine, grain, and kerf constraints exactly.
+
+Background reading on the approaches used: sequential/bin-oriented construction for guillotine bin packing ([constructive bin-oriented heuristic](https://www.sciencedirect.com/science/article/abs/pii/S0305054810003096), [sequential heuristic for 2D bin packing](https://www.researchgate.net/publication/265210317_Sequential_heuristic_for_the_two-dimensional_bin-packing_problem)) and the general problem class ([two-dimensional guillotine cutting stock](https://link.springer.com/article/10.1186/2251-712X-8-21)).
 
 Also worth knowing:
 

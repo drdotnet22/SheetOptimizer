@@ -220,6 +220,24 @@ public class NestingService
                 }
             }
 
+            // --- Also try the SEQUENTIAL (sheet-by-sheet) mode. ---
+            // It reliably consolidates waste onto the last sheet; the
+            // scoring decides whether it beats the global mode's winner.
+            foreach (var usePartials in hasPartials ? new[] { true, false } : new[] { true })
+            {
+                var sequential = NestOneMaterialSequential(
+                    group.Key, group.ToList(), kerfWidth,
+                    partialSheetInventory, materialOptions, usePartials);
+
+                var score = LayoutScore.Of(sequential, materialOptions);
+
+                if (bestScore is null || score.IsBetterThan(bestScore))
+                {
+                    bestScore = score;
+                    bestLayout = sequential;
+                }
+            }
+
             solution.Materials.Add(bestLayout!); // batch always has >= 1 run
         }
 
@@ -285,6 +303,7 @@ public class NestingService
         public int UnplacedCount;        // lower is better
         public int FullSheets;           // lower is better
         public decimal SheetAreaUsed;    // lower is better
+        public decimal MinFullSheetLoad; // lower is better (consolidation - see below)
         public decimal SmallScrapArea;   // lower is better
         public int LeftoverPieceCount;   // lower is better (fewer, bigger offcuts)
         public int CutCount;             // lower is better (tie-breaker)
@@ -308,6 +327,18 @@ public class NestingService
         private int ScrapBucket => (int)Math.Floor(SmallScrapArea / Tolerance);
         private int LargestLeftoverBucket => (int)Math.Floor(LargestLeftover / Tolerance);
 
+        // -------------------------------------------------------------------
+        // CONSOLIDATION: MinFullSheetLoad is the parts area on the LEAST
+        // filled full sheet. Comparing this (ascending) prefers layouts
+        // that pack the other sheets tight and leave the last sheet nearly
+        // empty - i.e. "a few small pieces on the end of the 4th sheet"
+        // with one big nearly-whole leftover, instead of spreading the
+        // waste as medium chunks across every sheet. This deliberately
+        // outranks small-scrap minimization: a nearly-empty sheet is worth
+        // far more than shaving slivers off the tightly-packed sheets.
+        // -------------------------------------------------------------------
+        private int MinLoadBucket => (int)Math.Floor(MinFullSheetLoad / Tolerance);
+
         public static LayoutScore Of(MaterialNesting layout, NestingOptions options)
         {
             var score = new LayoutScore
@@ -316,9 +347,20 @@ public class NestingService
                 Tolerance = Math.Max(1m, options.CutTieScrapTolerance),
             };
 
+            var minFullLoad = decimal.MaxValue;
+
             foreach (var sheet in layout.Sheets)
             {
-                if (!sheet.IsPartialSheet) score.FullSheets++;
+                if (!sheet.IsPartialSheet)
+                {
+                    score.FullSheets++;
+
+                    // Track the least-filled full sheet (consolidation metric).
+                    // Partial sheets are excluded: using up a small partial is
+                    // already a win and shouldn't game this metric.
+                    var load = sheet.Parts.Sum(p => p.Width * p.Length);
+                    if (load < minFullLoad) minFullLoad = load;
+                }
                 score.SheetAreaUsed += sheet.SheetWidth * sheet.SheetLength;
                 score.CutCount += sheet.CutCount;
                 score.LeftoverPieceCount += sheet.Leftovers.Count;
@@ -333,6 +375,8 @@ public class NestingService
                     if (area > score.LargestLeftover) score.LargestLeftover = area;
                 }
             }
+
+            score.MinFullSheetLoad = minFullLoad == decimal.MaxValue ? 0m : minFullLoad;
             return score;
         }
 
@@ -351,15 +395,20 @@ public class NestingService
             if (FullSheets != other.FullSheets) return FullSheets < other.FullSheets;
             if (SheetAreaUsed != other.SheetAreaUsed) return SheetAreaUsed < other.SheetAreaUsed;
 
-            // Waste, in coarse buckets (transitive "roughly equal").
-            if (ScrapBucket != other.ScrapBucket) return ScrapBucket < other.ScrapBucket;
+            // Consolidation first: prefer the layout whose least-filled full
+            // sheet is emptiest (waste gathered on ONE sheet, nearly whole).
+            if (MinLoadBucket != other.MinLoadBucket) return MinLoadBucket < other.MinLoadBucket;
             if (LargestLeftoverBucket != other.LargestLeftoverBucket)
                 return LargestLeftoverBucket > other.LargestLeftoverBucket;
+
+            // Then small scrap, in coarse buckets (transitive "roughly equal").
+            if (ScrapBucket != other.ScrapBucket) return ScrapBucket < other.ScrapBucket;
 
             // Roughly equal on waste - fewer saw cuts wins.
             if (CutCount != other.CutCount) return CutCount < other.CutCount;
 
             // Final exact tie-breakers.
+            if (MinFullSheetLoad != other.MinFullSheetLoad) return MinFullSheetLoad < other.MinFullSheetLoad;
             if (SmallScrapArea != other.SmallScrapArea) return SmallScrapArea < other.SmallScrapArea;
             if (LeftoverPieceCount != other.LeftoverPieceCount) return LeftoverPieceCount < other.LeftoverPieceCount;
             return LargestLeftover > other.LargestLeftover;
@@ -429,35 +478,7 @@ public class NestingService
         };
 
         // --- Expand quantities into individual pieces ------------------------
-        var pieces = new List<PieceToPlace>();
-        foreach (var part in parts)
-        {
-            // Guard against bad data - never let it crash the optimizer.
-            if (part.Width <= 0 || part.Length <= 0)
-            {
-                result.UnplacedParts.Add(new UnplacedPart
-                {
-                    PartId = part.Id,
-                    Label = part.Label,
-                    Width = part.Width,
-                    Length = part.Length,
-                    Reason = "Invalid dimensions (width and length must be greater than zero).",
-                });
-                continue;
-            }
-
-            for (var i = 0; i < part.Quantity; i++)
-            {
-                pieces.Add(new PieceToPlace
-                {
-                    PartId = part.Id,
-                    Label = part.Label,
-                    Width = part.Width,
-                    Length = part.Length,
-                    GrainMatters = part.GrainMatters,
-                });
-            }
-        }
+        var pieces = ExpandPieces(parts, result);
 
         // --- Sort according to this run's strategy ---------------------------
         pieces = SortPieces(pieces, strategy.Sort, strategy.Seed);
@@ -522,12 +543,54 @@ public class NestingService
             PlacePiece(best, piece, kerf, strategy.Split);
         }
 
-        // --- Collect leftovers --------------------------------------------------
+        CollectLeftovers(openSheets, result);
+        return result;
+    }
+
+    /// <summary>Turns Part rows (with quantities) into individual pieces to
+    /// place; invalid rows are reported instead of crashing.</summary>
+    private static List<PieceToPlace> ExpandPieces(List<Part> parts, MaterialNesting result)
+    {
+        var pieces = new List<PieceToPlace>();
+        foreach (var part in parts)
+        {
+            // Guard against bad data - never let it crash the optimizer.
+            if (part.Width <= 0 || part.Length <= 0)
+            {
+                result.UnplacedParts.Add(new UnplacedPart
+                {
+                    PartId = part.Id,
+                    Label = part.Label,
+                    Width = part.Width,
+                    Length = part.Length,
+                    Reason = "Invalid dimensions (width and length must be greater than zero).",
+                });
+                continue;
+            }
+
+            for (var i = 0; i < part.Quantity; i++)
+            {
+                pieces.Add(new PieceToPlace
+                {
+                    PartId = part.Id,
+                    Label = part.Label,
+                    Width = part.Width,
+                    Length = part.Length,
+                    GrainMatters = part.GrainMatters,
+                });
+            }
+        }
+        return pieces;
+    }
+
+    /// <summary>Records each sheet's unused regions and adds the sheets to
+    /// the result (slivers thinner than 1/4" are ignored - sawdust-adjacent).</summary>
+    private static void CollectLeftovers(List<OpenSheet> openSheets, MaterialNesting result)
+    {
         foreach (var sheet in openSheets)
         {
             foreach (var rect in sheet.FreeRects)
             {
-                // Ignore slivers thinner than 1/4" - they are sawdust-adjacent.
                 if (rect.W < 0.25m || rect.H < 0.25m) continue;
 
                 sheet.Layout.Leftovers.Add(new FreeRegion
@@ -540,8 +603,177 @@ public class NestingService
             }
             result.Sheets.Add(sheet.Layout);
         }
+    }
 
+    // =======================================================================
+    // SEQUENTIAL ("bin-oriented") mode.
+    //
+    // The global mode above places each part on the best spot across ALL
+    // open sheets - great for squeezing the sheet count down, but it tends
+    // to spread the waste over every sheet. This mode does what the
+    // bin-packing literature calls "bin-oriented" construction instead:
+    // pack ONE sheet as full as possible (trying many part orders and
+    // rules, keeping the fullest packing), commit it, and repeat with
+    // whatever is left. The natural outcome is tightly packed early sheets
+    // and all the leftover material pooled on the final sheet - one big
+    // reusable piece instead of medium chunks everywhere.
+    //
+    // Neither mode wins everywhere, so Nest() runs BOTH and the scoring
+    // picks the better result per material.
+    // =======================================================================
+
+    /// <summary>The rule combinations tried for EACH sheet in sequential
+    /// mode (24 deterministic + 50 randomized).</summary>
+    private static readonly List<Strategy> PerSheetCombos =
+        AllStrategies(includeNoPartialsVariants: false, extraRandomRuns: 50).ToList();
+
+    private static MaterialNesting NestOneMaterialSequential(
+        string material,
+        List<Part> parts,
+        decimal kerf,
+        List<PartialSheet> inventory,
+        NestingOptions options,
+        bool usePartials)
+    {
+        var result = new MaterialNesting
+        {
+            Material = material,
+            StrategyName = "sheet-by-sheet fill" + (usePartials ? "" : " / ignoring partials"),
+        };
+
+        var remaining = ExpandPieces(parts, result);
+
+        var partialStock = usePartials
+            ? inventory
+                .Where(ps => ps.Material.Trim().Equals(material, StringComparison.OrdinalIgnoreCase)
+                             && ps.Quantity > 0 && ps.Width > 0 && ps.Length > 0)
+                .Select(ps => new PartialStock { Sheet = ps, Remaining = ps.Quantity })
+                .ToList()
+            : new List<PartialStock>();
+
+        // Can this piece fit on an EMPTY sheet of the given size?
+        static bool FitsSheet(PieceToPlace p, decimal sheetW, decimal sheetL) =>
+            (p.Width <= sheetW && p.Length <= sheetL) ||
+            (!p.GrainMatters && p.Length <= sheetW && p.Width <= sheetL);
+
+        // Pieces that fit no sheet source at all are reported up front,
+        // so the sheet loop below can never get stuck on them.
+        remaining.RemoveAll(piece =>
+        {
+            var fitsSomething = FitsSheet(piece, options.SheetWidth, options.SheetLength)
+                || partialStock.Any(s => s.Remaining > 0 && FitsSheet(piece, s.Sheet.Width, s.Sheet.Length));
+            if (fitsSomething) return false;
+
+            result.UnplacedParts.Add(new UnplacedPart
+            {
+                PartId = piece.PartId,
+                Label = piece.Label,
+                Width = piece.Width,
+                Length = piece.Length,
+                Reason = $"Too large for a {options.SheetWidth}\" x {options.SheetLength}\" sheet" +
+                         (piece.GrainMatters ? " (rotation not allowed because grain matters)." : "."),
+            });
+            return true;
+        });
+
+        var openSheets = new List<OpenSheet>();
+
+        // --- Fill one sheet at a time until every piece is placed -----------
+        while (remaining.Count > 0)
+        {
+            // Which sheet do we fill next? Partial inventory first (the
+            // smallest partial that fits at least one remaining piece),
+            // otherwise a fresh full sheet.
+            var partial = partialStock
+                .Where(s => s.Remaining > 0 && remaining.Any(p => FitsSheet(p, s.Sheet.Width, s.Sheet.Length)))
+                .OrderBy(s => s.Sheet.Width * s.Sheet.Length)
+                .FirstOrDefault();
+
+            var sheetW = partial?.Sheet.Width ?? options.SheetWidth;
+            var sheetL = partial?.Sheet.Length ?? options.SheetLength;
+
+            // Try every rule combination on this ONE sheet; keep the packing
+            // with the most area (ties: fewer cuts, then fewer fragments).
+            OpenSheet? bestSheet = null;
+            List<PieceToPlace>? bestPlaced = null;
+            decimal bestArea = -1;
+
+            foreach (var combo in PerSheetCombos)
+            {
+                var (sheet, placed) = PackSingleSheet(
+                    sheetW, sheetL,
+                    isPartial: partial is not null,
+                    sourceId: partial?.Sheet.Id,
+                    sheetNumber: openSheets.Count + 1,
+                    remaining, kerf, combo);
+
+                var area = placed.Sum(p => p.Width * p.Length);
+                var isBetter = bestSheet is null
+                    || area > bestArea
+                    || (area == bestArea && sheet.Layout.CutCount < bestSheet.Layout.CutCount)
+                    || (area == bestArea && sheet.Layout.CutCount == bestSheet.Layout.CutCount
+                        && sheet.FreeRects.Count < bestSheet.FreeRects.Count);
+
+                if (isBetter)
+                {
+                    bestSheet = sheet;
+                    bestPlaced = placed;
+                    bestArea = area;
+                }
+            }
+
+            if (bestSheet is null || bestPlaced is null || bestPlaced.Count == 0)
+            {
+                // Nothing fits a fresh sheet (shouldn't happen after the
+                // pre-filter, but never loop forever - report and stop).
+                foreach (var piece in remaining)
+                {
+                    result.UnplacedParts.Add(new UnplacedPart
+                    {
+                        PartId = piece.PartId,
+                        Label = piece.Label,
+                        Width = piece.Width,
+                        Length = piece.Length,
+                        Reason = "Internal error: piece fit no freshly opened sheet.",
+                    });
+                }
+                break;
+            }
+
+            // Commit this sheet and remove its pieces from the pool.
+            openSheets.Add(bestSheet);
+            if (partial is not null) partial.Remaining--;
+            var placedSet = new HashSet<PieceToPlace>(bestPlaced);
+            remaining.RemoveAll(placedSet.Contains);
+        }
+
+        CollectLeftovers(openSheets, result);
         return result;
+    }
+
+    /// <summary>
+    /// Packs as many of the remaining pieces as possible onto ONE sheet,
+    /// using the given rule combination. Pieces that don't fit are simply
+    /// skipped (they stay in the pool for the next sheet).
+    /// </summary>
+    private static (OpenSheet Sheet, List<PieceToPlace> Placed) PackSingleSheet(
+        decimal sheetW, decimal sheetL, bool isPartial, int? sourceId, int sheetNumber,
+        List<PieceToPlace> remaining, decimal kerf, Strategy combo)
+    {
+        var sheet = MakeOpenSheet(sheetW, sheetL, isPartial, sourceId, sheetNumber);
+        var justThisSheet = new List<OpenSheet> { sheet };
+        var placed = new List<PieceToPlace>();
+
+        foreach (var piece in SortPieces(remaining, combo.Sort, combo.Seed))
+        {
+            var best = FindBestPlacement(justThisSheet, piece, combo.Placement);
+            if (best is null) continue; // no room on this sheet - skip
+
+            PlacePiece(best, piece, kerf, combo.Split);
+            placed.Add(piece);
+        }
+
+        return (sheet, placed);
     }
 
     private static List<PieceToPlace> SortPieces(List<PieceToPlace> pieces, PartSortRule rule, int seed)
