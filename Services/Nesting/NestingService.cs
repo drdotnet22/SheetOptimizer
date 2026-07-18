@@ -286,19 +286,34 @@ public class NestingService
         public int FullSheets;           // lower is better
         public decimal SheetAreaUsed;    // lower is better
         public decimal SmallScrapArea;   // lower is better
+        public int LeftoverPieceCount;   // lower is better (fewer, bigger offcuts)
         public int CutCount;             // lower is better (tie-breaker)
         public decimal LargestLeftover;  // HIGHER is better
 
-        /// <summary>Scrap differences below this count as "equally efficient"
-        /// so the cut count can decide (copied from NestingOptions).</summary>
-        public decimal ScrapTolerance;
+        /// <summary>Bucket size for the "roughly equal" comparisons
+        /// (copied from NestingOptions.CutTieScrapTolerance).</summary>
+        public decimal Tolerance;
+
+        // -------------------------------------------------------------------
+        // The "roughly equal" comparisons use BUCKETS (area divided by the
+        // tolerance, rounded down) rather than pairwise "within X of each
+        // other" checks. Buckets keep the comparison TRANSITIVE: with a
+        // pairwise check, scanning hundreds of candidates lets the champion
+        // drift - each new winner only slightly worse on scrap but with
+        // fewer cuts - ending far from the best-scrap layout. With buckets
+        // that cannot happen: a layout in a better scrap bucket always
+        // beats one in a worse bucket, no matter the order candidates are
+        // examined in.
+        // -------------------------------------------------------------------
+        private int ScrapBucket => (int)Math.Floor(SmallScrapArea / Tolerance);
+        private int LargestLeftoverBucket => (int)Math.Floor(LargestLeftover / Tolerance);
 
         public static LayoutScore Of(MaterialNesting layout, NestingOptions options)
         {
             var score = new LayoutScore
             {
                 UnplacedCount = layout.UnplacedParts.Count,
-                ScrapTolerance = options.CutTieScrapTolerance,
+                Tolerance = Math.Max(1m, options.CutTieScrapTolerance),
             };
 
             foreach (var sheet in layout.Sheets)
@@ -306,6 +321,7 @@ public class NestingService
                 if (!sheet.IsPartialSheet) score.FullSheets++;
                 score.SheetAreaUsed += sheet.SheetWidth * sheet.SheetLength;
                 score.CutCount += sheet.CutCount;
+                score.LeftoverPieceCount += sheet.Leftovers.Count;
 
                 foreach (var leftover in sheet.Leftovers)
                 {
@@ -321,10 +337,13 @@ public class NestingService
         }
 
         /// <summary>
-        /// Comparison - earlier criteria win ties. The scrap comparison is
-        /// "fuzzy": if two layouts' small-scrap areas are within the
-        /// tolerance of each other they count as equally efficient, and the
-        /// layout needing FEWER SAW CUTS wins.
+        /// Comparison - earlier criteria win ties.
+        ///
+        /// Material efficiency always dominates: sheets, then sheet area,
+        /// then the small-scrap bucket, then the largest-leftover bucket
+        /// (so waste consolidates into one big reusable piece). Only when
+        /// layouts are "roughly equal" on all of those does the saw-cut
+        /// count decide, followed by exact scrap/fragmentation numbers.
         /// </summary>
         public bool IsBetterThan(LayoutScore other)
         {
@@ -332,11 +351,17 @@ public class NestingService
             if (FullSheets != other.FullSheets) return FullSheets < other.FullSheets;
             if (SheetAreaUsed != other.SheetAreaUsed) return SheetAreaUsed < other.SheetAreaUsed;
 
-            var scrapDifference = SmallScrapArea - other.SmallScrapArea;
-            if (Math.Abs(scrapDifference) >= ScrapTolerance) return scrapDifference < 0;
+            // Waste, in coarse buckets (transitive "roughly equal").
+            if (ScrapBucket != other.ScrapBucket) return ScrapBucket < other.ScrapBucket;
+            if (LargestLeftoverBucket != other.LargestLeftoverBucket)
+                return LargestLeftoverBucket > other.LargestLeftoverBucket;
 
+            // Roughly equal on waste - fewer saw cuts wins.
             if (CutCount != other.CutCount) return CutCount < other.CutCount;
+
+            // Final exact tie-breakers.
             if (SmallScrapArea != other.SmallScrapArea) return SmallScrapArea < other.SmallScrapArea;
+            if (LeftoverPieceCount != other.LeftoverPieceCount) return LeftoverPieceCount < other.LeftoverPieceCount;
             return LargestLeftover > other.LargestLeftover;
         }
     }
